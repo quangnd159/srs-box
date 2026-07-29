@@ -25,5 +25,13 @@ c++ -std=c++17 -O2 -Wall -Wextra \
 /tmp/test_session "$ROOT/decks/hsk1-2.srs" || fail=1
 
 echo
+echo "=== review-log and last-known-time persistence ==="
+cd "$ROOT/firmware/components/persist/test"
+c++ -std=c++17 -O2 -Wall -Wextra \
+    -I../include -I../../session/include -I../../deck/include -I../../fsrs/include \
+    test_persist.cpp -o /tmp/test_persist
+/tmp/test_persist || fail=1
+
+echo
 if [ $fail -eq 0 ]; then echo "ALL HOST TESTS PASSED"; else echo "SOME TESTS FAILED" >&2; fi
 exit $fail

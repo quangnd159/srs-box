@@ -61,9 +61,17 @@ Control traffic shares the USB CDC link with normal `ESP_LOG` output and is disa
 
 ```
 host -> device   @shot | @tap <x> <y> | @swipe <x1> <y1> <x2> <y2> <ms> | @ping
+                 @time <unix_epoch_seconds>
 device -> host   @ok <text> | @err <text>
                  @shot <w> <h> <fmt> <nbytes>\n  then nbytes of raw pixels
 ```
+
+`@time` is how the device learns what time it is at all: there is no RTC on
+this board, so the firmware's clock is unset at every boot until the host
+(`./dev synctime`) hands over its own. The firmware calls `settimeofday()`
+and immediately persists the value to LittleFS, so a reboot with no host
+attached can restore the last time it knew about rather than reading 1970.
+See `docs/deck-format.md` and `firmware/components/persist/`.
 
 Screenshots come from `lv_snapshot_take` on the active screen into PSRAM, not from the LVGL draw buffer, which only holds a partial frame.
 

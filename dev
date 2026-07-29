@@ -8,6 +8,7 @@
 #   ./dev shot [out.png]  capture the device screen to a PNG
 #   ./dev tap X Y         inject a touch at (X, Y)
 #   ./dev swipe X1 Y1 X2 Y2 [ms]
+#   ./dev synctime        send the host's clock to the device (no RTC onboard)
 #   ./dev reset           reboot the device
 #   ./dev pins            recover the board pin map over JTAG
 #   ./dev buttons         find which GPIOs the buttons use (press them when asked)
@@ -124,6 +125,7 @@ case "${1:-doctor}" in
   shot)    shift || true; cmd_devctl shot "$@" ;;
   tap)     shift || true; cmd_devctl tap "$@" ;;
   swipe)   shift || true; cmd_devctl swipe "$@" ;;
+  synctime) shift || true; cmd_devctl time ;;
   reset)   shift || true; cmd_devctl reset ;;
   pins)    shift || true; ensure_venv; "$PY" "$ROOT/tools/readpins.py" "$@" ;;
   buttons) shift || true; ensure_venv; "$PY" "$ROOT/tools/findbuttons.py" "$@" ;;

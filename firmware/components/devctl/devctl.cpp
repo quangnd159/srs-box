@@ -19,6 +19,8 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <sys/time.h>
+
 #include <driver/usb_serial_jtag.h>
 #include <driver/usb_serial_jtag_vfs.h>
 #include <esp_err.h>
@@ -221,6 +223,7 @@ void handle_shot() {
 // Command dispatch
 
 void (*g_cal_cb)() = nullptr;
+void (*g_time_cb)(int64_t) = nullptr;
 
 void handle_line(char* line) {
   if (std::strcmp(line, "@ping") == 0) {
@@ -249,6 +252,22 @@ void handle_line(char* line) {
   if (std::sscanf(line, "@swipe %d %d %d %d %d", &x1, &y1, &x2, &y2, &ms) == 5) {
     queue_swipe(x1, y1, x2, y2, ms);
     reply_ok("swipe queued");
+    return;
+  }
+  // There is no RTC on this board (see CLAUDE.md): the clock starts every
+  // boot at whatever newlib defaults to and drifts from there. @time is how
+  // the host (which does have a real clock) hands over a wall-clock reading.
+  long long epoch;
+  if (std::sscanf(line, "@time %lld", &epoch) == 1) {
+    struct timeval tv = {};
+    tv.tv_sec = static_cast<time_t>(epoch);
+    tv.tv_usec = 0;
+    if (settimeofday(&tv, nullptr) != 0) {
+      reply_err("settimeofday failed");
+      return;
+    }
+    if (g_time_cb != nullptr) g_time_cb(static_cast<int64_t>(epoch));
+    reply_ok("time set");
     return;
   }
   reply_err("unrecognised command");
@@ -287,8 +306,9 @@ void rx_task(void*) {
 
 }  // namespace
 
-void init(void (*on_cal)()) {
+void init(void (*on_cal)(), void (*on_time_set)(int64_t)) {
   g_cal_cb = on_cal;
+  g_time_cb = on_time_set;
   usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
   // The default 256-byte TX ring buffer cannot hold a @shot chunk (writes
   // larger than an item the ring can hold fail immediately, they don't block).
@@ -313,7 +333,7 @@ void init(void (*on_cal)()) {
   }
 
   xTaskCreate(rx_task, "devctl_rx", 6144, nullptr, 3, nullptr);
-  ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe)");
+  ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe, @time)");
 }
 
 }  // namespace devctl

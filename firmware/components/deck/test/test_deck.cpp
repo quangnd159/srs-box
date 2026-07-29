@@ -60,7 +60,9 @@ int main(int argc, char** argv) {
         std::string("opens cleanly: ") + deck::error_string(err));
   if (err != deck::Error::None) return 1;
 
-  check(d.count() == 300, "card count is 300, got " + std::to_string(d.count()));
+  // 301, not 300: the source word list had 坐 and 吧 fused onto one line by a
+  // missing trailing newline, so 吧 was silently dropped until it was recovered.
+  check(d.count() == 301, "card count is 301, got " + std::to_string(d.count()));
   check(d.ids_ascending(), "card ids strictly ascending (binary search is valid)");
 
   // Every card must have a headword and a gloss; reading may be absent.

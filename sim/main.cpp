@@ -92,21 +92,21 @@ int main(int argc, char** argv) {
   ui::set_counts({3, 12, 15});
 
   // Scene 1: the prompt. Only the hanzi, nothing to read ahead to.
-  ui::show_card({"咖啡", "kāfēi", "coffee"}, false);
+  ui::show_card({"咖啡", "kāfēi", "cà phê"}, false);
   save("01-prompt");
 
   // Scene 2: revealed, with interval labels on the grade buttons.
-  ui::show_card({"咖啡", "kāfēi", "coffee"}, true);
+  ui::show_card({"咖啡", "kāfēi", "cà phê"}, true);
   ui::set_intervals({"1m", "6m", "10m", "4d"});
   save("02-revealed");
 
   // Scene 3: a long gloss, to check wrapping doesn't overflow the panel.
-  ui::show_card({"就", "jiù", "then; at once; just; only; with regard to"}, true);
+  ui::show_card({"吧", "ba", "(trợ từ: đề nghị hoặc rủ rê - ...nhé, ...đi); quán bar"}, true);
   ui::set_intervals({"1m", "8m", "12m", "5d"});
   save("03-long-gloss");
 
   // Scene 4: a multi-character headword at the large font size.
-  ui::show_card({"不客气", "bú kèqi", "you're welcome; don't be polite"}, true);
+  ui::show_card({"不客气", "bú kèqi", "không có gì; đừng khách sáo"}, true);
   ui::set_intervals({"1m", "10m", "1d", "3d"});
   save("04-long-headword");
 
@@ -120,17 +120,17 @@ int main(int argc, char** argv) {
   // Scene 6: after a long headword was shown revealed (scene 4 shrank
   // g.front to font_cjk_28), a fresh short-headword PROMPT must render at
   // full size again, not inherit the shrunk font.
-  ui::show_card({"你好", "nǐ hǎo", "hello"}, false);
+  ui::show_card({"你好", "nǐ hǎo", "xin chào"}, false);
   save("06-prompt-after-long-headword");
 
   // Scene 7: same short headword, now revealed, should also be full size.
-  ui::show_card({"你好", "nǐ hǎo", "hello"}, true);
+  ui::show_card({"你好", "nǐ hǎo", "xin chào"}, true);
   ui::set_intervals({"1m", "6m", "10m", "4d"});
   save("07-revealed-after-long-headword");
 
   // Scene 8: after a long gloss shrank g.back (scene 3), show_done reuses
   // g.back for "All done" -- must not render in the shrunk gloss font.
-  ui::show_card({"就", "jiù", "then; at once; just; only; with regard to"}, true);
+  ui::show_card({"吧", "ba", "(trợ từ: đề nghị hoặc rủ rê - ...nhé, ...đi); quán bar"}, true);
   ui::set_intervals({"1m", "8m", "12m", "5d"});
   ui::show_done(7);
   save("08-done-after-long-gloss");
@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
   // Scene 9: leaving done and revealing a short card must restore normal
   // fonts on both front and back (done pins front to 48 / back to 28, but
   // confirm a real card still fits/re-fits correctly afterward).
-  ui::show_card({"猫", "māo", "cat"}, true);
+  ui::show_card({"猫", "māo", "con mèo"}, true);
   ui::set_intervals({"1m", "6m", "10m", "4d"});
   save("09-revealed-after-done");
 

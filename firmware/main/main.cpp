@@ -5,14 +5,18 @@
 // confirmed on-device (see board_config.h and docs/pinout.md) and drive the
 // same reveal/grade callbacks as touch.
 //
-// Scheduling state lives in RAM for this prototype. The review log is already
-// the source of truth in session.h, so adding persistence later means writing
-// that log to flash and replaying it at boot.
+// Scheduling state lives in RAM, rebuilt at boot by replaying the review log
+// persisted on LittleFS (firmware/components/persist/) — the review log is
+// the source of truth in session.h, and due dates are only ever a checkpoint
+// derived from it. There is no RTC on this board, so the wall clock is
+// likewise recovered from the same filesystem; see restore_clock_if_unset().
 
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <vector>
+#include <sys/time.h>
 
 #include <driver/gpio.h>
 #include <driver/i2c_master.h>
@@ -24,6 +28,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_nv3023.h>
 #include <esp_lcd_touch_cst816s.h>
+#include <esp_littlefs.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_lvgl_port.h>
@@ -35,6 +40,7 @@
 #include "deck.h"
 #include "devctl.h"
 #include "fsrs.h"
+#include "persist.h"
 #include "review_ui.h"
 #include "session.h"
 
@@ -62,10 +68,23 @@ lv_display_t* g_disp = nullptr;
 // True while the @cal dot routine runs; enables RAWTOUCH logging.
 volatile bool g_cal_active = false;
 
+// LittleFS lives on the "storage" partition (see firmware/partitions.csv).
+// Mounted once at boot; g_fs_ok gates every later file access so a mount or
+// write failure degrades to RAM-only operation instead of crashing (same
+// policy as the `ok()` helper below for hardware calls).
+constexpr const char* kMountPoint = "/data";
+constexpr const char* kPartitionLabel = "storage";
+constexpr const char* kReviewLogPath = "/data/revlog.bin";
+constexpr const char* kTimePath = "/data/lastknowntime.bin";
+bool g_fs_ok = false;
+
 deck::Deck g_deck;
 session::Session* g_session = nullptr;
 int g_current = -1;
 bool g_revealed = false;
+// Seeded at boot from the replayed review log (see persist::reviewed_today),
+// so a reboot mid-session doesn't reset the count to zero; incremented live
+// thereafter exactly as before.
 int g_reviewed_today = 0;
 
 // Card text arrives as length-counted slices of the deck's text blob, which
@@ -97,9 +116,81 @@ void format_interval(char* out, size_t cap, int64_t seconds) {
 }
 
 int64_t now_seconds() {
-  // No RTC or NTP yet, so time runs from boot. Intervals are still correct
-  // relative to each other, which is all the prototype needs.
-  return static_cast<int64_t>(esp_timer_get_time() / 1000000);
+  // Real wall-clock time, set either by @time from the host or restored at
+  // boot from the last-known-time file (see restore_clock_if_unset()). Until
+  // one of those happens this reads as seconds since 1970, same as any
+  // freshly-booted device with no RTC.
+  return static_cast<int64_t>(std::time(nullptr));
+}
+
+// ---------------------------------------------------------------------------
+// Persistence: LittleFS mount, review-log replay, and the last-known-time
+// fallback for a board with no RTC. See firmware/components/persist/.
+
+bool littlefs_init() {
+  esp_vfs_littlefs_conf_t conf = {};
+  conf.base_path = kMountPoint;
+  conf.partition_label = kPartitionLabel;
+  conf.format_if_mount_failed = true;
+  conf.dont_mount = false;
+
+  const esp_err_t err = esp_vfs_littlefs_register(&conf);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_vfs_littlefs_register failed: %s — running RAM-only "
+                  "this boot, review history and time will not survive a reboot",
+             esp_err_to_name(err));
+    return false;
+  }
+
+  size_t total = 0, used = 0;
+  esp_littlefs_info(kPartitionLabel, &total, &used);
+  ESP_LOGI(TAG, "LittleFS mounted at %s: %zu/%zu bytes used", kMountPoint, used, total);
+  return true;
+}
+
+// Persists "now" as the last-known time. Called on every grade and every
+// ~60s from the heartbeat loop, so a later reboot has a recent fallback.
+void persist_time_now() {
+  if (!g_fs_ok) return;
+  if (!persist::save_time(kTimePath, now_seconds())) {
+    ESP_LOGW(TAG, "failed to persist last-known time");
+  }
+}
+
+// Runs after @time sets the clock (see devctl::init below): persist the new
+// value immediately rather than waiting for the next periodic tick, in case
+// power is lost soon after syncing.
+void on_time_synced(int64_t epoch) {
+  ESP_LOGI(TAG, "clock set via @time to %" PRId64, epoch);
+  persist_time_now();
+}
+
+// If the system clock still reads as unset (this board has no RTC, so every
+// boot starts at the newlib default of 1970), restore whatever time was last
+// persisted. This can only make cards read as due *later* than they truly
+// are — time simply didn't advance while the device sat there powered off —
+// never earlier, which is the safe direction: a card is never sprung on the
+// user before it was actually due.
+void restore_clock_if_unset() {
+  const std::time_t t = std::time(nullptr);
+  struct std::tm utc {};
+  gmtime_r(&t, &utc);
+  if (utc.tm_year + 1900 >= 2020) return;  // clock already looks like a real time
+
+  if (!g_fs_ok) {
+    ESP_LOGW(TAG, "clock unset and no filesystem to recover a last-known time from; "
+                  "waiting for @time");
+    return;
+  }
+  int64_t restored = 0;
+  if (persist::load_time(kTimePath, &restored)) {
+    struct timeval tv = {};
+    tv.tv_sec = static_cast<time_t>(restored);
+    settimeofday(&tv, nullptr);
+    ESP_LOGI(TAG, "clock unset at boot; restored last-known time %" PRId64, restored);
+  } else {
+    ESP_LOGW(TAG, "clock unset and no persisted time found; waiting for @time");
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +445,24 @@ void on_grade(int rating) {
   const auto card = g_deck.at(static_cast<size_t>(g_current));
   const auto entry =
       g_session->grade(g_current, static_cast<fsrs::Rating>(rating), now_seconds());
+
+  // Persist the entry before treating it as safely recorded. If power is cut
+  // right here, the worst case is losing this one grade from the next boot's
+  // replay — the RAM state grade() already applied is never trusted past a
+  // reboot anyway, only the log is.
+  if (g_fs_ok) {
+    persist::Entry pe;
+    pe.card_id = entry.card_id;
+    pe.reviewed = entry.reviewed;
+    pe.rating = entry.rating;
+    pe.state_before = entry.state_before;
+    pe.duration_ms = entry.duration_ms;
+    if (!persist::append(kReviewLogPath, pe)) {
+      ESP_LOGE(TAG, "failed to persist review-log entry; this grade may be lost on reboot");
+    }
+    persist_time_now();
+  }
+
   g_reviewed_today++;
   ESP_LOGI(TAG, "graded id=%016" PRIx64 " rating=%d  (log now %zu entries)",
            entry.card_id, rating, g_session->log().size());
@@ -487,6 +596,14 @@ extern "C" void app_main() {
   ESP_LOGI(TAG, "=== SRS Stick ===");
 
   power_on();
+
+  // --- persistence ----------------------------------------------------------
+  // Mounted before anything else touches the clock or the review log: both
+  // now_seconds() and the deck/session setup below depend on it being ready
+  // (or, if the mount failed, on g_fs_ok correctly gating every file access).
+  g_fs_ok = littlefs_init();
+  restore_clock_if_unset();
+
   i2c_init_and_scan();
   display_init();
   touch_init();
@@ -506,6 +623,43 @@ extern "C" void app_main() {
   static session::Session sess(g_deck, params, limits);
   g_session = &sess;
 
+  // --- review log replay ---------------------------------------------------
+  // The review log is the source of truth (see session.h): CardState is
+  // rebuilt here from scratch, before the first card is ever shown, rather
+  // than trusting any state left over from before the reboot.
+  if (g_fs_ok) {
+    const auto loaded = persist::load(kReviewLogPath);
+    if (!loaded.header_ok) {
+      ESP_LOGE(TAG, "review log at %s has a bad header; starting with empty "
+                    "history this boot (the file itself is left untouched)",
+               kReviewLogPath);
+    } else {
+      if (loaded.truncated_tail) {
+        ESP_LOGW(TAG, "review log had a partial trailing record (likely a power "
+                      "cut mid-write); dropping it, keeping %zu earlier entries",
+                 loaded.entries.size());
+        if (!persist::truncate_to_complete_records(kReviewLogPath)) {
+          ESP_LOGW(TAG, "could not truncate the partial tail; future appends may misalign");
+        }
+      }
+      std::vector<session::ReviewEntry> replay_entries;
+      replay_entries.reserve(loaded.entries.size());
+      for (const auto& e : loaded.entries) {
+        session::ReviewEntry re;
+        re.card_id = e.card_id;
+        re.reviewed = e.reviewed;
+        re.rating = e.rating;
+        re.state_before = e.state_before;
+        re.duration_ms = e.duration_ms;
+        replay_entries.push_back(re);
+      }
+      sess.replay(replay_entries.data(), replay_entries.size());
+      g_reviewed_today = persist::reviewed_today(loaded.entries, now_seconds(), 7 * 3600);
+      ESP_LOGI(TAG, "replayed %zu review-log entries from flash; %d reviewed today",
+               replay_entries.size(), g_reviewed_today);
+    }
+  }
+
   // --- UI -----------------------------------------------------------------
   lvgl_port_lock(0);
   ui::init(UI_H_RES, UI_V_RES);
@@ -515,7 +669,7 @@ extern "C" void app_main() {
   advance();
   lvgl_port_unlock();
 
-  devctl::init(start_calibration);
+  devctl::init(start_calibration, on_time_synced);
 
   xTaskCreate(button_task, "buttons", 4096, nullptr, 3, nullptr);
 
@@ -524,6 +678,11 @@ extern "C" void app_main() {
   int beat = 0;
   while (true) {
     vTaskDelay(pdMS_TO_TICKS(5000));
-    ESP_LOGI(TAG, "alive %d", ++beat);
+    ++beat;
+    // Every ~60s: keeps the last-known-time file fresh even during a long
+    // idle stretch with no grading, so an unclean shutdown still has a
+    // recent fallback for restore_clock_if_unset() on the next boot.
+    if (beat % 12 == 0) persist_time_now();
+    ESP_LOGI(TAG, "alive %d", beat);
   }
 }

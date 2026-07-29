@@ -8,15 +8,22 @@ same link, distinguished by a leading '@' so it never collides with log output.
                    @tap <x> <y>
                    @swipe <x1> <y1> <x2> <y2> <ms>
                    @ping
+                   @time <unix_epoch_seconds>
 
   device -> host   @ok <text> | @err <text>
                    @shot <w> <h> <fmt> <nbytes>\n followed by nbytes raw pixels
+
+There is no RTC on this board, so the device has no idea what time it is
+until the host tells it: `time` sends the host's own clock over as
+@time <epoch>, which the firmware feeds to settimeofday() and persists to
+flash immediately (see docs/deck-format.md and CLAUDE.md).
 
 Usage:
   devctl.py monitor
   devctl.py shot [out.png]
   devctl.py tap X Y
   devctl.py swipe X1 Y1 X2 Y2 [ms]
+  devctl.py time
   devctl.py reset
 """
 import argparse
@@ -176,6 +183,9 @@ def main() -> None:
             a, f"@swipe {a.x1} {a.y1} {a.x2} {a.y2} {a.ms}\n".encode()
         )
     )
+
+    tm = sub.add_parser("time", help="send the host's current clock to the device")
+    tm.set_defaults(func=lambda a: _simple(a, f"@time {int(time.time())}\n".encode()))
 
     r = sub.add_parser("reset", help="reboot the device")
     r.set_defaults(func=lambda a: hard_reset(open_port(a.port)))

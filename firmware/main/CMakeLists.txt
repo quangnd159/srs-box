@@ -9,7 +9,8 @@ idf_component_register(
                  "../components/fsrs/include"
                  "../components/deck/include"
                  "../components/session/include"
+                 "../components/persist/include"
                  "../components/ui/include"
     EMBED_FILES "../../decks/hsk1-2.srs"
-    REQUIRES devctl
+    REQUIRES devctl littlefs
 )
