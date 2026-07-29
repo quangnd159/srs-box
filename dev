@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Single entry point for working on the SRS Stick.
+#
+#   ./dev doctor          check device, toolchain, and environment
+#   ./dev build           compile the firmware
+#   ./dev flash           build, flash over USB, then stream logs
+#   ./dev logs            stream device logs
+#   ./dev shot [out.png]  capture the device screen to a PNG
+#   ./dev tap X Y         inject a touch at (X, Y)
+#   ./dev swipe X1 Y1 X2 Y2 [ms]
+#   ./dev reset           reboot the device
+#   ./dev pins            recover the board pin map over JTAG
+#   ./dev buttons         find which GPIOs the buttons use (press them when asked)
+#   ./dev test            run all host-side tests (no hardware needed)
+#   ./dev deck ...        compile a deck (see tools/deckc.py)
+#   ./dev font [glyphs]   regenerate the CJK font subset
+#   ./dev backup          dump the whole 16MB flash to backup/
+#   ./dev restore FILE    write a flash image back to the device
+#
+# Everything auto-detects the serial port; override with PORT=/dev/cu.xxx
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IDF_PATH="${IDF_PATH:-$HOME/esp/esp-idf}"
+VENV="$ROOT/.venv"
+PY="$VENV/bin/python"
+
+# --- helpers ----------------------------------------------------------------
+
+detect_port() {
+  if [[ -n "${PORT:-}" ]]; then echo "$PORT"; return; fi
+  shopt -s nullglob
+  local ports=(/dev/cu.usbmodem* /dev/cu.wchusbserial* /dev/cu.SLAB_USBtoUART*)
+  shopt -u nullglob
+  if [[ ${#ports[@]} -eq 0 ]]; then
+    echo "" ; return
+  fi
+  echo "${ports[0]}"
+}
+
+ensure_venv() {
+  if [[ ! -x "$PY" ]]; then
+    echo "==> creating python venv for host tools"
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install -q --upgrade pip
+    "$VENV/bin/pip" install -q pyserial pillow esptool
+  fi
+}
+
+idf() {
+  # shellcheck disable=SC1091
+  source "$IDF_PATH/export.sh" >/dev/null 2>&1
+  ( cd "$ROOT/firmware" && idf.py "$@" )
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_doctor() {
+  local port; port="$(detect_port)"
+  echo "project      $ROOT"
+  echo -n "serial port  "
+  if [[ -z "$port" ]]; then
+    echo "NOT FOUND — plug the device in with a data-capable USB-C cable"
+  else
+    echo "$port"
+  fi
+  echo -n "esp-idf      "
+  if [[ -f "$IDF_PATH/export.sh" ]]; then echo "$IDF_PATH"; else echo "MISSING at $IDF_PATH"; fi
+  echo -n "host tools   "
+  if [[ -x "$PY" ]]; then echo "$VENV"; else echo "not created yet (run any command to bootstrap)"; fi
+
+  if [[ -n "$port" ]]; then
+    ensure_venv
+    echo "--- chip ---"
+    "$VENV/bin/esptool" --port "$port" flash-id 2>/dev/null \
+      | grep -E "Chip type|Features|MAC|Detected flash size" || echo "could not talk to the chip"
+  fi
+}
+
+cmd_build()  { idf build; }
+
+cmd_flash() {
+  local port; port="$(detect_port)"
+  [[ -n "$port" ]] || { echo "no device found"; exit 1; }
+  idf -p "$port" flash
+  cmd_logs
+}
+
+cmd_logs() {
+  ensure_venv
+  local port; port="$(detect_port)"
+  "$PY" "$ROOT/tools/devctl.py" --port "$port" monitor "$@"
+}
+
+cmd_devctl() {
+  ensure_venv
+  local port; port="$(detect_port)"
+  "$PY" "$ROOT/tools/devctl.py" --port "$port" "$@"
+}
+
+cmd_backup() {
+  ensure_venv
+  local port; port="$(detect_port)"
+  mkdir -p "$ROOT/backup"
+  local out="$ROOT/backup/flash-$(date +%Y%m%d-%H%M%S).bin"
+  echo "==> dumping 16MB to $out (a few minutes)"
+  "$VENV/bin/esptool" --port "$port" --baud 460800 read-flash 0 0x1000000 "$out"
+  echo "$out"
+}
+
+cmd_restore() {
+  ensure_venv
+  local port; port="$(detect_port)"
+  local img="${1:?usage: ./dev restore FILE}"
+  echo "==> writing $img back to the device"
+  "$VENV/bin/esptool" --port "$port" --baud 460800 write-flash 0 "$img"
+}
+
+case "${1:-doctor}" in
+  doctor)  shift || true; cmd_doctor ;;
+  build)   shift || true; cmd_build ;;
+  flash)   shift || true; cmd_flash ;;
+  logs)    shift || true; cmd_logs "$@" ;;
+  shot)    shift || true; cmd_devctl shot "$@" ;;
+  tap)     shift || true; cmd_devctl tap "$@" ;;
+  swipe)   shift || true; cmd_devctl swipe "$@" ;;
+  reset)   shift || true; cmd_devctl reset ;;
+  pins)    shift || true; ensure_venv; "$PY" "$ROOT/tools/readpins.py" "$@" ;;
+  buttons) shift || true; ensure_venv; "$PY" "$ROOT/tools/findbuttons.py" "$@" ;;
+  test)    shift || true; "$ROOT/tools/runtests.sh" ;;
+  deck)    shift || true; ensure_venv; "$PY" "$ROOT/tools/deckc.py" "$@" ;;
+  font)    shift || true; "$ROOT/tools/buildfont.sh" "$@" ;;
+  backup)  shift || true; cmd_backup ;;
+  restore) shift || true; cmd_restore "$@" ;;
+  monitor) shift || true; cmd_logs "$@" ;;
+  *) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+esac

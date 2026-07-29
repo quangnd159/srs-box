@@ -1,0 +1,11 @@
+# SRS Stick partition table for a 16MB flash.
+#
+# One app slot rather than dual OTA: updates arrive over USB, and the freed
+# space is better spent on decks. `storage` holds the deck, scheduling state,
+# and the review log (see docs/deck-format.md).
+#
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+phy_init,   data, phy,      0xf000,   0x1000
+factory,    app,  factory,  0x10000,  4M
+storage,    data, littlefs,         , 11M
