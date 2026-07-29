@@ -49,8 +49,10 @@
 #define LCD_OFFSET_X         0
 #define LCD_OFFSET_Y         36
 
-// The device is used in landscape (short edge vertical), so the UI is rotated
-// 90 degrees. LVGL then presents a 280x240 canvas.
+// The panel is 240 x 284 visible (see LCD_H_RES/LCD_V_RES and
+// LCD_OFFSET_Y above), used portrait, straight through with no rotation.
+// swap_xy stays false (see LCD_SWAP_XY), so the UI canvas is 240x284, not a
+// swapped 284x240.
 #define UI_H_RES             240
 #define UI_V_RES             284
 
@@ -67,7 +69,9 @@
 //
 // swap_xy must stay false: enabling it put the panel into a geometry the
 // driver's gap handling does not transform alongside, which produced static.
-// Landscape therefore needs a different approach than a hardware axis swap.
+// The UI is portrait already (see UI_H_RES/UI_V_RES above), so this is moot
+// in practice -- noted here only so nobody re-tries it while chasing some
+// other bug.
 #define LCD_MIRROR_X         false
 #define LCD_MIRROR_Y         true
 #define LCD_SWAP_XY          false
@@ -93,18 +97,18 @@
 #define PIN_I2S_DIN          GPIO_NUM_7
 
 // ---------------------------------------------------------------------------
-// Buttons: not yet identified
+// Buttons: confirmed on-device 2026-07-29
 // ---------------------------------------------------------------------------
-// The board has power, minus and plus buttons. JTAG sampling of GPIO_IN
-// narrowed them to these candidates. GPIO26-37 were excluded because on an
-// N16R8 they carry the SPI flash and octal PSRAM, so their activity is memory
-// traffic rather than input.
-#define BUTTON_CANDIDATES    {GPIO_NUM_1, GPIO_NUM_2, GPIO_NUM_3, GPIO_NUM_17, \
-                              GPIO_NUM_21, GPIO_NUM_38, GPIO_NUM_39,           \
-                              GPIO_NUM_40, GPIO_NUM_41, GPIO_NUM_42,           \
-                              GPIO_NUM_45, GPIO_NUM_46, GPIO_NUM_47, GPIO_NUM_48}
-
-// GPIO0 is the strapping/BOOT pin and is almost always a button on these
-// boards, but it is scanned separately so a press cannot be confused with the
-// bootloader entry condition.
-#define PIN_BOOT_BUTTON      GPIO_NUM_0
+// An on-device GPIO scan logged presses directly over serial while the user
+// pressed each physical button in turn, which settled these three
+// unambiguously. See docs/pinout.md.
+//
+// PIN_BTN_POWER is dual-function and cannot be used as ordinary UI input: a
+// short press gives a clean, readable edge (~20-150ms), but a long press cuts
+// power at the hardware latch and the board drops off USB immediately, with
+// no chance for firmware to react. main.cpp treats it as inert once the
+// answer is revealed; the review loop is fully drivable with PIN_BTN_MINUS
+// and PIN_BTN_PLUS alone. See docs/pinout.md for the full story.
+#define PIN_BTN_POWER        GPIO_NUM_2   // power; short-press only, see above
+#define PIN_BTN_PLUS         GPIO_NUM_40  // plus / Good
+#define PIN_BTN_MINUS        GPIO_NUM_39  // minus / Again

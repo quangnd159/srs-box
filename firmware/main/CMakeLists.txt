@@ -11,4 +11,5 @@ idf_component_register(
                  "../components/session/include"
                  "../components/ui/include"
     EMBED_FILES "../../decks/hsk1-2.srs"
+    REQUIRES devctl
 )

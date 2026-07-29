@@ -216,6 +216,12 @@ void show_card(const CardView& card, bool revealed) {
   lv_label_set_text(g.reading, card.reading ? card.reading : "");
   lv_label_set_text(g.back, card.back ? card.back : "");
 
+  // The headword shrinks only if it is genuinely long; most are one or two
+  // characters and should stay at the display size. fit_font always starts
+  // its search from the largest font, so this is correct regardless of what
+  // font the label was left in by a previous card or state.
+  static const lv_font_t* const head_fonts[] = {&font_cjk_48, &font_cjk_28};
+
   if (revealed) {
     lv_obj_clear_flag(g.reading, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(g.divider, LV_OBJ_FLAG_HIDDEN);
@@ -223,9 +229,6 @@ void show_card(const CardView& card, bool revealed) {
     lv_obj_clear_flag(g.buttons, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(g.hint, LV_OBJ_FLAG_HIDDEN);
 
-    // The headword shrinks only if it is genuinely long; most are one or two
-    // characters and should stay at the display size.
-    static const lv_font_t* const head_fonts[] = {&font_cjk_48, &font_cjk_28};
     fit_font(g.front, head_fonts, 2, g.body_h / 2);
 
     // Headword sits high, answer fills the space below it.
@@ -252,6 +255,9 @@ void show_card(const CardView& card, bool revealed) {
     lv_obj_add_flag(g.buttons, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_flag(g.hint, LV_OBJ_FLAG_HIDDEN);
 
+    // The prompt has the whole body to itself (no reading/divider/gloss
+    // below it), minus room for the "tap to reveal" hint at the bottom.
+    fit_font(g.front, head_fonts, 2, g.body_h - 40);
     lv_obj_align(g.front, LV_ALIGN_CENTER, 0, -10);
     lv_label_set_text(g.hint, "tap to reveal");
     lv_obj_align(g.hint, LV_ALIGN_BOTTOM_MID, 0, -6);
@@ -302,6 +308,14 @@ void show_done(int reviewed_today) {
   lv_obj_add_flag(g.buttons, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(g.back, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(g.hint, LV_OBJ_FLAG_HIDDEN);
+
+  // g.front and g.back are reused from the card states, where fit_font may
+  // have left either of them on a smaller font (a long headword shrinks
+  // front, a long gloss shrinks back). This screen's text is fixed and
+  // short, so just pin both back to their intended sizes explicitly rather
+  // than inheriting whatever the last card happened to leave behind.
+  lv_obj_set_style_text_font(g.front, &font_cjk_48, LV_PART_MAIN);
+  lv_obj_set_style_text_font(g.back, &font_cjk_28, LV_PART_MAIN);
 
   lv_label_set_text(g.front, "\xE2\x9C\x93");  // check mark
   lv_obj_align(g.front, LV_ALIGN_CENTER, 0, -30);

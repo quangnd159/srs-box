@@ -114,6 +114,34 @@ int main(int argc, char** argv) {
   ui::show_done(42);
   save("05-done");
 
+  // Regression scenes for state-leak bugs: a style/font set in one state
+  // must not bleed into a later, unrelated state.
+
+  // Scene 6: after a long headword was shown revealed (scene 4 shrank
+  // g.front to font_cjk_28), a fresh short-headword PROMPT must render at
+  // full size again, not inherit the shrunk font.
+  ui::show_card({"你好", "nǐ hǎo", "hello"}, false);
+  save("06-prompt-after-long-headword");
+
+  // Scene 7: same short headword, now revealed, should also be full size.
+  ui::show_card({"你好", "nǐ hǎo", "hello"}, true);
+  ui::set_intervals({"1m", "6m", "10m", "4d"});
+  save("07-revealed-after-long-headword");
+
+  // Scene 8: after a long gloss shrank g.back (scene 3), show_done reuses
+  // g.back for "All done" -- must not render in the shrunk gloss font.
+  ui::show_card({"就", "jiù", "then; at once; just; only; with regard to"}, true);
+  ui::set_intervals({"1m", "8m", "12m", "5d"});
+  ui::show_done(7);
+  save("08-done-after-long-gloss");
+
+  // Scene 9: leaving done and revealing a short card must restore normal
+  // fonts on both front and back (done pins front to 48 / back to 28, but
+  // confirm a real card still fits/re-fits correctly afterward).
+  ui::show_card({"猫", "māo", "cat"}, true);
+  ui::set_intervals({"1m", "6m", "10m", "4d"});
+  save("09-revealed-after-done");
+
   std::printf("done\n");
   return 0;
 }

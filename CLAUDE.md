@@ -36,6 +36,8 @@ The underlying cause is libusb on macOS 27 (Tahoe): every ep0 control transfer t
 
 Vanilla Homebrew `openocd` will not work either — it lacks the `esp_usb_jtag` interface entirely.
 
+**The power button can cut hardware power, and so can a hard reset on battery.** A long press on the power button (GPIO2) trips the hardware power latch and the board switches off, dropping off USB entirely — this is why the review UI never relies on that button for anything but a short press. Separately, a hard reset on battery sometimes fails to keep the latch driven through the brief window where all GPIOs float, and the board powers off the same way. Tell the two failure modes apart by whether the board still enumerates: gone from the USB device tree entirely means powered off (press the power button); port still present but unresponsive means wedged (physical unplug/replug, see above). See `docs/pinout.md`.
+
 ## Working on it
 
 Everything goes through `./dev`, which auto-detects the serial port and bootstraps its own Python venv:
@@ -113,6 +115,18 @@ combination per flash does not, especially when settings interact.
 **The simulator cannot see these bugs.** It renders the framebuffer, which is
 correct; the fault is downstream in the panel. Never report a display fix as
 verified on the strength of a simulator render.
+
+**The same "put calibration on the device" lesson applies to touch, not just
+display.** A dot shown at known positions with raw taps logged back beats
+guessing an orientation from gestures, for the same reference-frame reasons as
+above; `@cal` implements this for the CST816 touch film and found it to be
+swapped and inverted relative to the panel. Two touch-specific traps found the
+hard way: the CST816 auto-sleeps and stops updating its coordinate registers
+after a few idle seconds, so polling it without INT wired (INT is confirmed
+unwired on this board) requires disabling auto-sleep at init or touch goes
+"mostly dead"; and the panel's own scan-direction mirror (`mirror_y`) must
+never be copied onto the touch config, since the touch film's frame is a
+separate physical fact from the LCD's scan direction.
 
 ## Borrowed from chat-stick
 

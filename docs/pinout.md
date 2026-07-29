@@ -38,9 +38,9 @@ Observed during boot of the stock firmware:
 | Audio in | ES7210 | Slave mode, 4 mics (`MIC1`–`MIC4`), TDM, 16-bit. |
 | Audio bus | I2S | RX is TDM 4-slot; TX is standard stereo/mono. Runs at 24kHz in stock firmware. |
 | Battery | ADC | Raw counts around 2300 map to ~68%; charge state is detected separately. |
-| Buttons | at least 6 | `InitializeButtons()` registers six handlers. Exact GPIOs unknown. |
+| Buttons | at least 6 (stock firmware); 3 physical (power, plus, minus) on this board | `InitializeButtons()` registers six handlers in the stock firmware. The three physical buttons, confirmed on-device 2026-07-29 (see Pin map below): GPIO39 = minus, GPIO40 = plus, GPIO2 = power (short-press only — see below). |
 
-Display resolution is **not yet confirmed**. The stock firmware never logs it, and NV3023 panels ship in several sizes.
+Display resolution: confirmed 240 x 284 visible (240 x 320 panel memory, 36-row gap). See "Display configuration" below.
 
 ## Flash layout (stock)
 
@@ -77,10 +77,19 @@ Worth copying the shape of this: dual OTA slots plus a large asset area. Our lay
 | I2S WS | **16** | `I2S0O_WS_OUT` |
 | I2S DOUT (to ES8311) | **6** | `I2S0O_SD_OUT` |
 | I2S DIN (from ES7210) | **7** | `I2S0I_SD_IN` |
+| Button: power (short press only) | **2** | plain GPIO, confirmed 2026-07-29 by an on-device GPIO scan with the user pressing the button |
+| Button: plus / Good | **40** | plain GPIO, confirmed 2026-07-29 by an on-device GPIO scan with the user pressing the button |
+| Button: minus / Again | **39** | plain GPIO, confirmed 2026-07-29 by an on-device GPIO scan with the user pressing the button |
 
 **The display is on SPI3, not SPI2/FSPI**, and uses a single data line — ordinary 4-wire SPI, not QSPI. Anything written against an FSPI example will need adjusting.
 
 **GPIO18 is the one to be careful with.** It is driven high roughly 200ms after reset, earlier than the display, the codec, or anything else. On a battery-powered board that pattern means a power latch or peripheral rail enable. Drive it high early in our firmware too. If a first boot dies immediately or the screen never lights, this is the first thing to check.
+
+**A hard reset on battery can drop power entirely, and this is expected, not a new bug.** During any reset all GPIOs float briefly, including whatever drives the GPIO18 latch, and the latch does not always survive that gap. Observed twice during this session's flashing (2026-07-29): `./dev flash` completes, the post-flash hard reset runs, and the board vanishes from USB — not wedged, genuinely powered off. Recovery is pressing the power button (a short press is enough; see the buttons section above).
+
+**Telling power-off from a wedge (see below) apart:** check whether the board still enumerates.
+- Powered off: the board disappears from the USB device tree entirely (e.g. it drops out of `ioreg`/`system_profiler SPUSBDataTree`, and the serial port node itself vanishes). Fix: press the power button.
+- Wedged: the port stays present in the device tree but every operation on it fails (serial silent, OpenOCD's `libusb_get_string_descriptor_ascii()` failing). Fix: physical unplug/replug (see below).
 
 Distinguishing DC from RESET was done by sampling `GPIO_OUT_REG` and `GPIO_ENABLE_REG` repeatedly across a reset: DC toggles constantly while the panel init sequence alternates command and data, whereas RESET makes a single clean low-to-high transition and then holds.
 
@@ -113,7 +122,8 @@ check the ordering first.
 
 **Do not enable `swap_xy`.** It puts the panel into a geometry the driver's
 gap handling does not transform alongside, and the screen fills with static.
-Landscape orientation needs a different approach.
+The UI is portrait already, matching the panel directly, so there is no
+reason to reach for it.
 
 **Colour order is BGR.** Under RGB, red and blue swap: amber renders blue and
 blue renders orange, while green is unaffected.
@@ -135,14 +145,108 @@ patterns being used as evidence, which produced a long chain of confident
 wrong conclusions: a phantom transpose, a phantom MADCTL fault, and estimates
 of the width ranging from 132 to 400 pixels.
 
+### The three physical buttons (confirmed 2026-07-29)
+
+JTAG sampling of `GPIO_IN` was inconclusive: the halt/resume cycle samples too
+slowly, and GPIO26-37 dominate the results because on an N16R8 they carry the
+SPI flash and octal PSRAM, so their traffic looks like activity. That
+narrowed things to candidates (GPIO2, GPIO39, GPIO40, plus GPIO0/BOOT) but no
+further.
+
+What settled it, finally, on 2026-07-29: an on-device GPIO scan with the user
+pressing each physical button in turn while the scan logged edges directly
+over serial. This is the first time the mapping was actually verified against
+a live button press rather than inferred — an earlier "identified" claim in
+this doc predates this session and was not actually confirmed. The result is
+unambiguous: **GPIO39 = minus, GPIO40 = plus, GPIO2 = power**. See the pin map
+above.
+
+**The power button is dual-function, and that matters for firmware design.**
+A short press produces a clean, readable edge on GPIO2 (pulse width roughly
+20-150ms) — that part behaves like an ordinary button. But a *long* press cuts
+power at the hardware latch: the board switches off and drops off USB
+entirely, with no chance for firmware to log or react. This means GPIO2
+**cannot be relied on for UI input** — any firmware that requires the user to
+tell short-press from long-press on this pin is gambling on the hardware
+latch's timing, not the firmware's. Because of this, `main.cpp`'s button
+mapping treats the power button as inert during review: when the answer is
+hidden, any button (including power) reveals it; once revealed, only minus
+(Again) and plus (Good) do anything, and the entire review loop is drivable
+without ever touching the power button. See `firmware/main/main.cpp`.
+
 ### Still unknown
 
 Inputs do not appear in the output routing, so these remain open:
 
-- **The three physical buttons** (power, minus, plus). JTAG sampling of `GPIO_IN` was inconclusive: the halt/resume cycle samples too slowly, and GPIO26–37 dominate the results because on an N16R8 they carry the SPI flash and octal PSRAM, so their traffic looks like activity. Candidates after excluding those are GPIO2, GPIO39, GPIO40, plus GPIO0 (BOOT). The bring-up firmware scans all plausible pins at 20ms and logs presses directly, which is far faster than doing this over JTAG.
-- Touch interrupt and touch reset lines for the CST816.
+- Touch reset line for the CST816 (touch INT is now known — see "Touch" below: it is unwired).
 - The battery ADC channel.
-- **Display resolution.** The stock firmware never logs it and NV3023 panels ship in several sizes; the seller says 2.0 inch. Assumed 240×320 for now. The bring-up firmware draws a 4px red border at the assumed edges plus 20px green ticks, so one look at the panel settles it.
+
+## Touch (confirmed 2026-07-29)
+
+### INT is not wired
+
+A scan of every free candidate GPIO showed zero edges while the glass was
+being touched. The CST816's INT line is not connected to the ESP32 at all;
+the firmware must poll over I2C instead of waiting on an interrupt. The touch
+reset line is still unknown.
+
+### The CST816 must have auto-sleep disabled, or polling misses most touches
+
+Polling without INT ran into the CST816's own auto-sleep: after a few seconds
+idle it stops updating its coordinate registers, so a poll loop reads stale
+data and touches appear to do nothing. Symptom, if this write is missing:
+touch is "mostly dead, occasionally works" — not a wiring or geometry problem,
+an auto-sleep problem. Fix: write register `0xFE = 0x01` (disable auto-sleep)
+right after `esp_lcd_touch_new_i2c_cst816s`, at init. Implemented in
+`firmware/main/main.cpp`, `touch_init()`.
+
+### The touch film's coordinate frame is swapped and inverted relative to the panel
+
+The film's native frame is 284x240 (note the axes are swapped versus the
+240x284 visible panel): its x axis runs along the panel's long side (vertical
+when the device is held with USB at the bottom), and its y axis runs along
+the short side, inverted.
+
+This was measured, not guessed, with an on-device calibration routine: send
+`@cal` over the devctl protocol (the same `@`-prefixed CDC link used for
+`@shot`/`@tap`). A red dot is shown at five known positions in turn; raw
+touch coordinates are logged per tap (`RAWTOUCH` lines appear in the log only
+while calibration is active); an affine transform is then fit host-side
+against the five (known position, raw reading) pairs.
+
+The fitted transform, implemented in `process_coordinates()` inside
+`touch_init()` in `firmware/main/main.cpp`:
+
+```
+ui_x = 223.8 - 0.9231 * raw_y
+ui_y = -16.8 + 0.9739 * raw_x
+```
+
+Residuals were 2-5px on all five calibration targets.
+
+**Leave the touch driver's `swap_xy`/`mirror` flags false.** The affine
+above already encodes the real swap, scale, and offset; the driver's flags
+would additionally try to swap/mirror against the wrong axis lengths (they
+assume the touch frame matches the panel frame, which it does not here), so
+enabling them on top of the affine breaks it again.
+
+**Never copy the panel's `mirror_y` to the touch config.** The LCD's
+`mirror_y` (see "Display configuration" above) compensates the panel's own
+scan direction and has nothing to do with the touch film's frame. Copying it
+into the touch config was the original bug: taps landed in the wrong half of
+the screen and the grade buttons were unreachable. The touch frame and the
+panel's scan direction are independent facts and must be calibrated
+independently.
+
+**`@cal` is permanent tooling, not a one-off diagnostic.** Send `@cal\n` over
+the CDC link (e.g. from a short Python one-liner using the existing
+`devctl.py` transport) any time the touch film is replaced or the mapping is
+suspected to have drifted; it cycles a dot through 5 positions (6s each) and
+logs the raw readings needed to refit the transform.
+
+A full hardware-verification pass on 2026-07-29 confirmed all four grade
+buttons plus reveal work by touch, with taps landing within a few pixels of
+target and ratings 1-4 each firing correctly on the first try.
 
 ## The board wedges during long USB sessions
 

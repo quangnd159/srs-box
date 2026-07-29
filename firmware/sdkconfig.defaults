@@ -21,8 +21,16 @@ CONFIG_COMPILER_CXX_EXCEPTIONS=n
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_USE_LOG=y
-CONFIG_LV_MEM_SIZE_KILOBYTES=64
 CONFIG_LV_DEF_REFR_PERIOD=16
+
+# @shot needs lv_snapshot_take(), and the ~135KB it allocates for a 240x284
+# RGB565 frame is far bigger than LVGL's small built-in pool
+# (CONFIG_LV_MEM_SIZE_KILOBYTES, 64KB). Route lv_malloc() through the C
+# library malloc instead: with CONFIG_SPIRAM_USE_MALLOC=y (above), the IDF
+# heap allocator already spills large allocations into PSRAM automatically,
+# so this is enough to make room without any LVGL-side pool size to tune.
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_USE_SNAPSHOT=y
 
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
