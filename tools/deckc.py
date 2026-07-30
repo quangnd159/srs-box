@@ -2,11 +2,25 @@
 """Compile a word list into the on-device `.srs` deck format.
 
     deckc.py build --name "HSK 1" --id hsk1 decks/hsk1.raw.tsv -o decks/hsk1.srs
+    deckc.py build --name "French 1" --id fr1 --lang fr decks/fr1.tsv -o decks/fr1.srs
     deckc.py inspect decks/hsk1.srs
 
-Input is the hskhsk.com tab-separated format:
+Input is tab-separated, in one of two shapes, auto-detected from the first
+data row's column count (a single file must be entirely one shape or the
+other):
 
     simplified <TAB> traditional <TAB> numeric-pinyin <TAB> pinyin <TAB> gloss
+
+  the hskhsk.com format, 5 columns, used for Chinese decks; or
+
+    front <TAB> reading <TAB> back
+
+  a 3-column format for everything else (reading may be empty, e.g. a
+  language with no separate phonetic transcription).
+
+`--lang` (default "zh") is written to the deck's META section and gates
+language-specific rendering on-device: pinyin tone-colouring of the reading
+line applies only when lang=zh (see docs/sync-protocol.md).
 
 See docs/deck-format.md for the binary layout. The compiler is also
 responsible for reporting the glyph set, which the font subsetter consumes.
@@ -68,29 +82,39 @@ class TextPool:
 def read_rows(path: Path) -> list[dict]:
     rows = []
     seen: set[str] = set()
+    expected_cols: int | None = None  # set from the first data row; see module docstring
     with path.open(encoding="utf-8-sig") as fh:  # utf-8-sig strips the BOM
         for lineno, line in enumerate(fh, 1):
             line = line.rstrip("\n").rstrip("\r")
             if not line.strip():
                 continue
             parts = line.split("\t")
-            if len(parts) < 5:
-                print(f"  skipping line {lineno}: expected 5 fields, got {len(parts)}",
-                      file=sys.stderr)
+
+            if expected_cols is None:
+                # First data row decides the shape for the whole file: 3
+                # columns (front/reading/back) or 5 (hskhsk.com's format).
+                expected_cols = 3 if len(parts) < 5 else 5
+
+            if len(parts) < expected_cols:
+                print(f"  skipping line {lineno}: expected {expected_cols} fields, got "
+                      f"{len(parts)}", file=sys.stderr)
                 continue
-            simplified, _traditional, _numeric, pinyin, gloss = parts[:5]
-            simplified = simplified.strip()
-            if not simplified:
+
+            if expected_cols == 5:
+                front, _traditional, _numeric, reading, back = parts[:5]
+            else:
+                front, reading, back = parts[:3]
+
+            front = front.strip()
+            if not front:
                 continue
-            if simplified in seen:
+            if front in seen:
                 # Duplicate headwords would collide on card id.
-                print(f"  skipping duplicate headword {simplified!r} on line {lineno}",
+                print(f"  skipping duplicate headword {front!r} on line {lineno}",
                       file=sys.stderr)
                 continue
-            seen.add(simplified)
-            rows.append(
-                dict(front=simplified, reading=pinyin.strip(), back=gloss.strip())
-            )
+            seen.add(front)
+            rows.append(dict(front=front, reading=reading.strip(), back=back.strip()))
     return rows
 
 
@@ -135,7 +159,8 @@ def build(args) -> int:
     )
 
     meta_blob = (
-        f"name={args.name}\nslug={args.id}\ncards={len(cards)}\n".encode("utf-8")
+        f"name={args.name}\nslug={args.id}\ncards={len(cards)}\nlang={args.lang}\n"
+        .encode("utf-8")
     )
 
     sections = [(b"META", meta_blob), (b"CARD", card_blob), (b"TEXT", bytes(text.buf))]
@@ -236,6 +261,7 @@ def main() -> int:
     b.add_argument("-o", "--output", required=True)
     b.add_argument("--name", required=True)
     b.add_argument("--id", required=True, help="stable deck slug; changing it resets all card ids")
+    b.add_argument("--lang", default="zh", help="bcp47-ish tag written to META (default zh)")
     b.add_argument("--glyphs", help="also write the glyph set to this file")
     b.set_defaults(func=build)
 

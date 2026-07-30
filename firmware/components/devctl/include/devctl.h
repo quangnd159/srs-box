@@ -20,6 +20,9 @@ namespace devctl {
 // `on_gap`, if given, runs when the host sends @gap <y>: it applies a new
 // panel y-offset live, for aligning the write window to the glass without
 // reflashing (the "put calibration on the device" lesson).
+//
+// Also implements the file-transfer half of the protocol (@fput, @fget,
+// @fls, @fdel, @reboot), documented in full in docs/sync-protocol.md.
 void init(void (*on_cal)() = nullptr, void (*on_time_set)(int64_t epoch_seconds) = nullptr,
           void (*on_gap)(int y_gap) = nullptr);
 

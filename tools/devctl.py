@@ -10,9 +10,21 @@ same link, distinguished by a leading '@' so it never collides with log output.
                    @ping
                    @time <unix_epoch_seconds>
                    @gap <y>
+                   @fput <path> <nbytes> <crc32>
+                   @fget <path>
+                   @fls
+                   @fdel <path>
+                   @reboot
 
   device -> host   @ok <text> | @err <text>
                    @shot <w> <h> <fmt> <nbytes>\n followed by nbytes raw pixels
+                   @fget <nbytes> <crc32>\n followed by nbytes raw file bytes
+
+File transfer (@fput/@fget/@fls/@fdel/@reboot) is the sync protocol described
+in docs/sync-protocol.md: paths are relative to the device's /data mount and
+restricted to decks/, fonts/, and revlog.bin. See that doc for the exact wire
+format; this module mirrors it, including muting expectations around @fget's
+binary payload the same way @shot does.
 
 There is no RTC on this board, so the device has no idea what time it is
 until the host tells it: `time` sends the host's own clock over as
@@ -27,10 +39,17 @@ Usage:
   devctl.py time
   devctl.py gap Y
   devctl.py reset
+  devctl.py fput LOCAL_FILE DEVICE_PATH
+  devctl.py fget DEVICE_PATH [LOCAL_FILE]
+  devctl.py fls
+  devctl.py fdel DEVICE_PATH
+  devctl.py reboot
 """
 import argparse
 import sys
 import time
+import zlib
+from pathlib import Path
 
 import serial
 from serial.tools import list_ports
@@ -78,6 +97,20 @@ def cmd_monitor(args) -> None:
         if data:
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
+
+
+def _await_reply(ser: serial.Serial, timeout: float) -> bytes:
+    """Next @ok/@err line, skipping any interleaved ESP_LOG output.
+
+    The CDC link carries log lines between protocol replies, so waiting for
+    "the next line" races against the logger; every ack must tolerate noise.
+    """
+    end = time.time() + timeout
+    while time.time() < end:
+        line = _read_line(ser, timeout=max(0.1, end - time.time()))
+        if line.startswith(b"@ok") or line.startswith(b"@err"):
+            return line
+    raise TimeoutError("timed out waiting for an @ok/@err reply")
 
 
 def _read_line(ser: serial.Serial, timeout: float) -> bytes:
@@ -142,6 +175,104 @@ def cmd_shot(args) -> None:
     print(f"{args.out}  {w}x{h} {fmt}")
 
 
+def _progress(label: str, done: int, total: int) -> None:
+    pct = 100 * done // total if total else 100
+    end = "\n" if done >= total else ""
+    print(f"\r{label} {pct:3d}% ({done}/{total} bytes)", end=end, file=sys.stderr, flush=True)
+
+
+def cmd_fput(args) -> None:
+    data = Path(args.local_file).read_bytes()
+    crc = zlib.crc32(data) & 0xFFFFFFFF
+
+    ser = open_port(args.port, timeout=0.1)
+    ser.reset_input_buffer()
+    ser.write(f"@fput {args.device_path} {len(data)} {crc:08x}\n".encode())
+
+    line = _await_reply(ser, timeout=5)
+    if line != b"@ok send":
+        sys.exit(line.decode(errors="replace") or "device did not ack @fput")
+
+    sent = 0
+    chunk_size = 4096
+    while sent < len(data):
+        n = ser.write(data[sent : sent + chunk_size])
+        sent += n
+        _progress(f"push {args.device_path}", sent, len(data))
+
+    # Generous: the device tolerates LittleFS GC stalls up to 30s before its
+    # own timeout, so the host must outwait that plus the write itself.
+    line = _await_reply(ser, timeout=60)
+    print(line.decode(errors="replace"))
+    if not line.startswith(b"@ok"):
+        sys.exit(1)
+
+
+def cmd_fget(args) -> None:
+    ser = open_port(args.port, timeout=0.1)
+    ser.reset_input_buffer()
+    ser.write(f"@fget {args.device_path}\n".encode())
+
+    end = time.time() + args.timeout
+    header = None
+    while time.time() < end:
+        line = _read_line(ser, timeout=max(0.1, end - time.time()))
+        if line.startswith(b"@fget "):
+            header = line.decode()
+            break
+        if line.startswith(b"@err"):
+            sys.exit(line.decode())
+        if args.verbose and line:
+            print(line.decode(errors="replace"), file=sys.stderr)
+    if header is None:
+        sys.exit("device never sent a file header")
+
+    _, nbytes, crc_hex = header.split()
+    nbytes = int(nbytes)
+
+    out = args.local_file or Path(args.device_path).name
+    received = bytearray()
+    chunk_size = 4096
+    while len(received) < nbytes:
+        want = min(chunk_size, nbytes - len(received))
+        received += _read_exact(ser, want, timeout=args.timeout)
+        _progress(f"pull {args.device_path}", len(received), nbytes)
+
+    crc = zlib.crc32(bytes(received)) & 0xFFFFFFFF
+    if f"{crc:08x}" != crc_hex:
+        sys.exit(f"crc mismatch: device said {crc_hex}, got {crc:08x}")
+
+    Path(out).write_bytes(received)
+    print(f"{out}  {nbytes:,} bytes")
+
+
+def cmd_fls(args) -> None:
+    ser = open_port(args.port)
+    ser.reset_input_buffer()
+    ser.write(b"@fls\n")
+    line = _await_reply(ser, timeout=5)
+    if not line.startswith(b"@ok fls"):
+        sys.exit(line.decode(errors="replace") or "device did not ack @fls")
+    entries = line.decode()[len("@ok fls") :].strip().split()
+    if not entries:
+        print("(no files)")
+        return
+    for entry in entries:
+        if entry == "...":
+            print("... (listing truncated)")
+            continue
+        path, _, size = entry.rpartition("=")
+        print(f"  {path:<40} {int(size):>10,} bytes")
+
+
+def cmd_fdel(args) -> None:
+    _simple(args, f"@fdel {args.device_path}\n".encode())
+
+
+def cmd_reboot(args) -> None:
+    _simple(args, b"@reboot\n")
+
+
 def _simple(args, payload: bytes) -> None:
     ser = open_port(args.port)
     ser.reset_input_buffer()
@@ -193,8 +324,38 @@ def main() -> None:
     g.add_argument("y", type=int)
     g.set_defaults(func=lambda a: _simple(a, f"@gap {a.y}\n".encode()))
 
-    r = sub.add_parser("reset", help="reboot the device")
-    r.set_defaults(func=lambda a: hard_reset(open_port(a.port)))
+    # DTR/RTS pulsing is known to wedge THIS board's USB stack (recovery needs
+    # a physical replug — see CLAUDE.md). Kept only behind an explicit flag;
+    # use `reboot` (@reboot, a clean esp_restart) instead.
+    r = sub.add_parser("reset", help="DTR/RTS reset — WEDGES this board, use 'reboot'")
+    r.add_argument("--i-know-this-wedges-the-board", action="store_true")
+    r.set_defaults(
+        func=lambda a: hard_reset(open_port(a.port))
+        if a.i_know_this_wedges_the_board
+        else sys.exit("refusing: DTR/RTS wedges this board's USB. Use 'reboot' instead.")
+    )
+
+    fp = sub.add_parser("fput", help="push a local file to the device (@fput)")
+    fp.add_argument("local_file")
+    fp.add_argument("device_path", help="path relative to /data, e.g. decks/hsk1.srs")
+    fp.set_defaults(func=cmd_fput)
+
+    fg = sub.add_parser("fget", help="pull a file from the device (@fget)")
+    fg.add_argument("device_path")
+    fg.add_argument("local_file", nargs="?")
+    fg.add_argument("--timeout", type=float, default=30)
+    fg.add_argument("--verbose", action="store_true")
+    fg.set_defaults(func=cmd_fget)
+
+    fl = sub.add_parser("fls", help="list files on the device (@fls)")
+    fl.set_defaults(func=cmd_fls)
+
+    fd = sub.add_parser("fdel", help="delete a file on the device (@fdel)")
+    fd.add_argument("device_path")
+    fd.set_defaults(func=cmd_fdel)
+
+    rb = sub.add_parser("reboot", help="apply pushed content by restarting (@reboot)")
+    rb.set_defaults(func=cmd_reboot)
 
     args = ap.parse_args()
     args.func(args)

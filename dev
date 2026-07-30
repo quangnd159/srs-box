@@ -10,7 +10,7 @@
 #   ./dev swipe X1 Y1 X2 Y2 [ms]
 #   ./dev synctime        send the host's clock to the device (no RTC onboard)
 #   ./dev gap Y           set the panel y-offset live (alignment calibration)
-#   ./dev reset           reboot the device
+#   ./dev reset           reboot the device (DTR/RTS pulse, like esptool)
 #   ./dev pins            recover the board pin map over JTAG
 #   ./dev buttons         find which GPIOs the buttons use (press them when asked)
 #   ./dev test            run all host-side tests (no hardware needed)
@@ -18,6 +18,14 @@
 #   ./dev font [glyphs]   regenerate the CJK font subset
 #   ./dev backup          dump the whole 16MB flash to backup/
 #   ./dev restore FILE    write a flash image back to the device
+#
+# Sync protocol (see docs/sync-protocol.md):
+#   ./dev push LOCAL DEVICE_PATH   push one file (@fput), e.g. decks/hsk1.srs
+#   ./dev pull DEVICE_PATH [OUT]   pull one file (@fget), e.g. revlog.bin
+#   ./dev ls                       list files on the device (@fls)
+#   ./dev rm DEVICE_PATH           delete a file on the device (@fdel)
+#   ./dev reboot                   apply pushed content by restarting (@reboot)
+#   ./dev sync DECK...             push decks, then @reboot (fonts not rebuilt yet)
 #
 # Everything auto-detects the serial port; override with PORT=/dev/cu.xxx
 set -euo pipefail
@@ -118,6 +126,20 @@ cmd_restore() {
   "$VENV/bin/esptool" --port "$port" --baud 460800 write-flash 0 "$img"
 }
 
+cmd_sync() {
+  if [[ $# -eq 0 ]]; then
+    echo "usage: ./dev sync DECK.srs [DECK2.srs ...]"
+    exit 1
+  fi
+  for deck in "$@"; do
+    [[ -f "$deck" ]] || { echo "not found: $deck"; exit 1; }
+    cmd_devctl fput "$deck" "decks/$(basename "$deck")"
+  done
+  cmd_devctl reboot
+  echo "==> fonts are not rebuilt by 'sync'; push a rebuilt font_cjk_*.bin with"
+  echo "    './dev push' separately if the new decks introduce glyphs it lacks"
+}
+
 case "${1:-doctor}" in
   doctor)  shift || true; cmd_doctor ;;
   build)   shift || true; cmd_build ;;
@@ -137,5 +159,11 @@ case "${1:-doctor}" in
   backup)  shift || true; cmd_backup ;;
   restore) shift || true; cmd_restore "$@" ;;
   monitor) shift || true; cmd_logs "$@" ;;
-  *) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
+  push)    shift || true; cmd_devctl fput "$@" ;;
+  pull)    shift || true; cmd_devctl fget "$@" ;;
+  ls)      shift || true; cmd_devctl fls ;;
+  rm)      shift || true; cmd_devctl fdel "$@" ;;
+  reboot)  shift || true; cmd_devctl reboot ;;
+  sync)    shift || true; cmd_sync "$@" ;;
+  *) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' ;;
 esac
