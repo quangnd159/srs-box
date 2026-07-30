@@ -173,6 +173,26 @@ void on_time_synced(int64_t epoch) {
 void on_gap_adjust(int y_gap) {
   esp_lcd_panel_set_gap(g_panel, LCD_OFFSET_X, y_gap);
   if (lvgl_port_lock(pdMS_TO_TICKS(1000))) {
+    // Edge markers: magenta on the first two framebuffer rows, cyan on the
+    // last two. The UI background is black and so is unwritten GRAM, so
+    // without these there is no way to see on the glass where the window
+    // actually ends. Created on first @gap, kept until reboot.
+    static bool markers_made = false;
+    if (!markers_made) {
+      markers_made = true;
+      const lv_color_t cols[2] = {lv_color_hex(0xFF00FF), lv_color_hex(0x00FFFF)};
+      const int ys[2] = {0, UI_V_RES - 2};
+      for (int i = 0; i < 2; ++i) {
+        lv_obj_t* line = lv_obj_create(lv_screen_active());
+        lv_obj_set_size(line, UI_H_RES, 2);
+        lv_obj_set_pos(line, 0, ys[i]);
+        lv_obj_set_style_bg_color(line, cols[i], LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(line, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_width(line, 0, LV_PART_MAIN);
+        lv_obj_set_style_radius(line, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(line, 0, LV_PART_MAIN);
+      }
+    }
     lv_obj_invalidate(lv_screen_active());
     lvgl_port_unlock();
   }

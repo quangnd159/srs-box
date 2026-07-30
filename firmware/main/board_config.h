@@ -40,14 +40,21 @@
 #define LCD_H_RES            240
 #define LCD_V_RES            284
 
-// The controller has 320 rows of memory but the panel only shows 284 of them,
-// and the visible window is the LAST 284 rows -- so the gap is 320-284 = 36.
+// The controller has 320 rows of memory but the panel shows only some of
+// them. The original probes (splash JPEG 284x240; lines at y=296/308 visible,
+// y=320 not; nothing at y=0) put the visible window at the LAST 284 rows,
+// i.e. gap 36 -- but their ~12-row granularity hid an 8-row error that
+// surfaced as a 1mm dead band above the UI on the glass.
 //
-// Confirmed three ways: the stock firmware's splash JPEG is 284x240; probe
-// lines at y=296 and y=308 were visible while y=320 was not; and a border at
-// y=0 never appeared while only the y>=36 sliver of a 50px origin block did.
+// Remeasured 2026-07-30 with the @gap edge markers (magenta line on the
+// first framebuffer row, cyan on the last, stepped live via `./dev gap`):
+// the bezel opening actually exposes ~288 rows, and 28 is the offset that
+// CENTERS the 284-row window in it, leaving a symmetric ~2-row black margin
+// under each bezel edge. Those margin rows are unwritten GRAM; the full-GRAM
+// clear at init keeps them black. No offset can fill both ends with a
+// 284-row UI, so do not chase the margins by tweaking this further.
 #define LCD_OFFSET_X         0
-#define LCD_OFFSET_Y         36
+#define LCD_OFFSET_Y         28
 
 // The panel is 240 x 284 visible (see LCD_H_RES/LCD_V_RES and
 // LCD_OFFSET_Y above), used portrait, straight through with no rotation.
