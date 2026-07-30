@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Single entry point for working on the SRS Stick.
+# Single entry point for working on the SRS Box.
 #
 #   ./dev doctor          check device, toolchain, and environment
 #   ./dev build           compile the firmware

@@ -1,4 +1,4 @@
-// SRS Stick — spaced-repetition flashcards on a DB MEGA3D 3ST.
+// SRS Box — spaced-repetition flashcards on a DB MEGA3D 3ST.
 //
 // Brings up the panel and touch controller, loads the deck embedded in flash,
 // and runs the review loop. The three physical grade/reveal buttons are
@@ -626,7 +626,7 @@ void start_calibration() {
 }  // namespace
 
 extern "C" void app_main() {
-  ESP_LOGI(TAG, "=== SRS Stick ===");
+  ESP_LOGI(TAG, "=== SRS Box ===");
 
   power_on();
 

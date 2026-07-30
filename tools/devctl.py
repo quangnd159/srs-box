@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side control for the SRS Stick.
+"""Host-side control for the SRS Box.
 
 The device speaks normal ESP_LOG text on USB CDC. Control traffic rides the
 same link, distinguished by a leading '@' so it never collides with log output.

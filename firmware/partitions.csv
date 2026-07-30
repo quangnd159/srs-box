@@ -1,4 +1,4 @@
-# SRS Stick partition table for a 16MB flash.
+# SRS Box partition table for a 16MB flash.
 #
 # One app slot rather than dual OTA: updates arrive over USB, and the freed
 # space is better spent on decks. `storage` holds the deck, scheduling state,
