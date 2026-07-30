@@ -1,0 +1,9 @@
+web/public/data/cedict.compact.json is derived from CC-CEDICT.
+
+CC-CEDICT is published by MDBG (https://www.mdbg.net/chinese/dictionary?page=cc-cedict)
+and licensed under the Creative Commons Attribution-ShareAlike 4.0
+International License: https://creativecommons.org/licenses/by-sa/4.0/
+
+Source referenced work: CEDICT, Copyright (C) 1997, 1998 Paul Andrew Denisowski.
+
+Regenerate with: bun run scripts/fetch-cedict.ts
