@@ -50,11 +50,19 @@
 // first framebuffer row, cyan on the last, stepped live via `./dev gap`):
 // the bezel opening actually exposes ~288 rows, and 28 is the offset that
 // CENTERS the 284-row window in it, leaving a symmetric ~2-row black margin
-// under each bezel edge. Those margin rows are unwritten GRAM; the full-GRAM
-// clear at init keeps them black. No offset can fill both ends with a
-// 284-row UI, so do not chase the margins by tweaking this further.
+// under each bezel edge.
+//
+// 36 is nevertheless the deliberate choice, tried both ways on the glass:
+// the panel is edge-lit from the bottom and has a ~1mm backlight glow band
+// there, which 28 exposes as a white bar under the grade buttons (the
+// framebuffer margin covering it is black, and no drawn pixel can darken
+// backlight bleed). 36 parks the bright buttons over the glow so it is
+// invisible, and the ~8 unwritten rows this leaves at the TOP read as clean
+// black bezel thanks to the full-GRAM clear at init. The bottom ~5px of the
+// framebuffer (the under-button margin) lands off-glass and is sacrificed
+// knowingly. Do not "correct" this to 28 without re-looking at the glow.
 #define LCD_OFFSET_X         0
-#define LCD_OFFSET_Y         28
+#define LCD_OFFSET_Y         36
 
 // The panel is 240 x 284 visible (see LCD_H_RES/LCD_V_RES and
 // LCD_OFFSET_Y above), used portrait, straight through with no rotation.
