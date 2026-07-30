@@ -88,6 +88,10 @@ class Session {
       if (index < 0) continue;  // a card removed from the deck; ignore
       apply(index, static_cast<fsrs::Rating>(entries[i].rating),
             entries[i].reviewed);
+      // The daily caps (new_done_on/reviews_done_on) are counted from log_,
+      // so replayed history must land there too. Without this, a reboot
+      // forgets today's quota and deals a fresh batch of new cards.
+      log_.push_back(entries[i]);
     }
   }
 

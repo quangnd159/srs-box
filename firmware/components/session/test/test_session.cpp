@@ -159,6 +159,32 @@ int main(int argc, char** argv) {
     check(seen > 0 && scheduled_ahead > 0, "cards get scheduled into the future");
   }
 
+  // --- a reboot must not reset the daily new-card quota ---------------------
+  // Regression: replay() used to rebuild card state without repopulating the
+  // in-RAM log, so the quota counters (which read the log) saw an empty day
+  // and dealt a second batch of new cards after every power cycle.
+  {
+    session::Session before(d, params, limits);
+    int64_t now = kStart;
+    for (int i = 0; i < 200; ++i) {
+      const int idx = before.next_card(now, 7 * 3600);
+      if (idx < 0) break;
+      before.grade(idx, fsrs::Rating::Easy, now);
+      now += 20;
+    }
+    check(before.next_card(now, 7 * 3600) < 0, "session exhausted for the day");
+
+    // "Reboot": fresh session, state rebuilt purely from the persisted log.
+    session::Session after(d, params, limits);
+    after.replay(before.log().data(), before.log().size());
+    const auto c = after.counts(now, 7 * 3600);
+    check(c.fresh == 0,
+          "after a replayed reboot no new cards remain today, got " +
+              std::to_string(c.fresh));
+    check(after.next_card(now, 7 * 3600) < 0,
+          "after a replayed reboot the finished session stays finished");
+  }
+
   // --- day rollover is at 4am, not midnight --------------------------------
   {
     const int off = 7 * 3600;
