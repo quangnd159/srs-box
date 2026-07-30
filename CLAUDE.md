@@ -2,7 +2,7 @@
 
 An Anki-style spaced-repetition flashcard device on an ESP32-S3 handheld. Primary use is Chinese vocabulary, so CJK text and per-card audio are first-class, not afterthoughts.
 
-Q is new to embedded work. Explain the *why* in plain terms when it matters, lead on technical decisions rather than asking him to arbitrate them, and keep learning notes in Vietnamese in `~/vaults/dqnotes/Personal/SRS Stick.md`.
+Q is new to embedded work. Explain the *why* in plain terms when it matters, lead on technical decisions rather than asking him to arbitrate them, and keep learning notes in Vietnamese in `~/vaults/dqnotes/Personal/SRS Box.md`.
 
 ## The device
 
