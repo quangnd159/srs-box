@@ -39,6 +39,8 @@
 #include <freertos/task.h>
 #include <lvgl.h>
 
+LV_FONT_DECLARE(font_cjk_28);  // compiled-in; for the boot splash only
+
 #include "board_config.h"
 #include "deck.h"
 #include "deck_registry.h"
@@ -277,6 +279,18 @@ void power_on() {
   ok("gpio_config", gpio_config(&cfg));
   ok("gpio_set_level", gpio_set_level(PIN_POWER_ENABLE, 1));
   ESP_LOGI(TAG, "power enable GPIO%d high", PIN_POWER_ENABLE);
+
+  // Pin the backlight LOW right away. Left floating it lights up with the
+  // power rail, and boot now spends many seconds loading fonts before the
+  // first frame exists, so an early-lit backlight shows a blank white panel
+  // that whole time. backlight_init() takes over at the end of app_main,
+  // once the home screen has actually been drawn.
+  gpio_config_t bl = {};
+  bl.pin_bit_mask = 1ULL << PIN_LCD_BACKLIGHT;
+  bl.mode = GPIO_MODE_OUTPUT;
+  ok("gpio_config", gpio_config(&bl));
+  ok("gpio_set_level", gpio_set_level(PIN_LCD_BACKLIGHT, 0));
+
   vTaskDelay(pdMS_TO_TICKS(50));
 }
 
@@ -766,11 +780,40 @@ const lv_font_t* try_load_font(int size) {
   return f;
 }
 
-void load_runtime_fonts() {
-  if (!g_fs_ok) return;  // nothing under /data to load without a mounted filesystem
+// Loads the multi-MB deck fonts off LittleFS in the background, then swaps
+// them into the live UI. Boot shows the picker immediately with the
+// compiled-in fonts (which cost nothing to "load" — they're memory-mapped
+// out of the app image); this task closes the glyph-coverage gap ~10s
+// later. A card opened from a new deck before then renders its unknown
+// hanzi as blanks and heals on the spot when the swap lands.
+//
+// The slow part — lv_binfont_create's file read and allocation — runs
+// WITHOUT the LVGL lock, which is safe here because it only touches lv_fs
+// and lv_malloc (routed through the thread-safe C heap by
+// CONFIG_LV_USE_CLIB_MALLOC, see sdkconfig.defaults) and no display state.
+// Only the swap itself takes the lock.
+void font_load_task(void*) {
+  if (!g_fs_ok) {
+    vTaskDelete(nullptr);
+    return;
+  }
+  const int64_t t0 = esp_timer_get_time();
+  const lv_font_t* f48 = try_load_font(48);
+  const lv_font_t* f28 = try_load_font(28);
+  const lv_font_t* f20 = try_load_font(20);
   const lv_font_t* f16 = try_load_font(16);
-  ui::set_fonts(try_load_font(48), try_load_font(28), try_load_font(20), f16);
-  home::set_name_font(f16);
+
+  if (lvgl_port_lock(pdMS_TO_TICKS(5000))) {
+    ui::set_fonts(f48, f28, f20, f16);
+    home::set_name_font(f16);
+    // Re-render whatever is on the glass so an early-opened card or the
+    // picker's deck names pick the new glyphs up immediately.
+    if (g_session != nullptr && g_current >= 0) show_current();
+    lvgl_port_unlock();
+  }
+  ESP_LOGI(TAG, "deck fonts swapped in after %lld ms",
+           (esp_timer_get_time() - t0) / 1000);
+  vTaskDelete(nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -910,6 +953,29 @@ extern "C" void app_main() {
   i2c_init_and_scan();
   display_init();
   touch_init();
+
+  // Boot splash. The couple of seconds until the picker is up go to the
+  // review-log replay and scanning the deck files, and a dark screen reads
+  // as "not responding". Draw a splash with the compiled-in fonts, flush
+  // it, and only then lift the backlight (held low since power_on()) onto
+  // a drawn frame. home_ui replaces this screen when the picker is ready;
+  // the big deck fonts are NOT waited for here (see font_load_task).
+  if (lvgl_port_lock(pdMS_TO_TICKS(1000))) {
+    lv_obj_t* scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0B0B0F), LV_PART_MAIN);
+    lv_obj_t* title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, &font_cjk_28, LV_PART_MAIN);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xE5E7EB), LV_PART_MAIN);
+    lv_label_set_text(title, "SRS Box");
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -18);
+    lv_obj_t* sub = lv_label_create(scr);
+    lv_obj_set_style_text_font(sub, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_color(sub, lv_color_hex(0x6B7280), LV_PART_MAIN);
+    lv_label_set_text(sub, "starting...");
+    lv_obj_align(sub, LV_ALIGN_CENTER, 0, 16);
+    lvgl_port_unlock();
+  }
+  vTaskDelay(pdMS_TO_TICKS(150));  // one beat for the LVGL task to flush it
   backlight_init(85);
 
   // --- review log replay ---------------------------------------------------
@@ -957,7 +1023,6 @@ extern "C" void app_main() {
   ui::init(UI_H_RES, UI_V_RES);
   ui::set_callbacks(on_reveal, on_grade);
   ui::set_back_callback(on_back);
-  load_runtime_fonts();
 
   home::init(UI_H_RES, UI_V_RES);
   home::set_select_callback(on_home_select);
@@ -967,6 +1032,10 @@ extern "C" void app_main() {
   // nothing loaded into it yet.
   go_home();
   lvgl_port_unlock();
+
+  // The picker above is live right now, on the compiled-in fonts. The
+  // multi-MB deck fonts stream in behind it; see font_load_task.
+  xTaskCreate(font_load_task, "fonts", 8192, nullptr, 2, nullptr);
 
   devctl::init(start_calibration, on_time_synced, on_gap_adjust);
 
