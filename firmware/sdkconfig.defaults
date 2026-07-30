@@ -32,5 +32,14 @@ CONFIG_LV_DEF_REFR_PERIOD=16
 CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_USE_SNAPSHOT=y
 
+# Runtime CJK fonts pushed to /data/fonts/ (docs/sync-protocol.md) are loaded
+# with lv_binfont_create("A:/data/fonts/font_cjk_28.bin"), which needs an
+# LVGL filesystem driver over the same POSIX calls LittleFS is already
+# mounted through. Drive letter 65 is 'A'; see main.cpp's try_load_font().
+CONFIG_LV_USE_FS_POSIX=y
+CONFIG_LV_FS_POSIX_LETTER=65
+CONFIG_LV_FS_POSIX_PATH=""
+
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_LV_FONT_FMT_TXT_LARGE=y

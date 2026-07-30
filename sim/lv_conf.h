@@ -524,7 +524,10 @@
 /*Enable handling large font and/or fonts with a lot of characters.
  *The limit depends on the font size, font face and bpp.
  *Compiler error will be triggered if a font needs it.*/
-#define LV_FONT_FMT_TXT_LARGE 0
+/* 32-bit glyph offsets: the full-deck 48px CJK font's bitmap blob exceeds
+ * the compact format's addressable range, which corrupts high-offset glyphs
+ * (seen on hardware as garbled hanzi). Must match the firmware's setting. */
+#define LV_FONT_FMT_TXT_LARGE 1
 
 /*Enables/disables support for compressed fonts.*/
 #define LV_USE_FONT_COMPRESSED 0
@@ -724,9 +727,12 @@
 #endif
 
 /*API for open, read, etc*/
-#define LV_USE_FS_POSIX 0
+/* Enabled so runtime CJK fonts pushed to /data/fonts/ (docs/sync-protocol.md)
+ * can be loaded with lv_binfont_create("A:/data/fonts/font_cjk_28.bin") in
+ * both the simulator and the firmware; see main.cpp's font-loading code. */
+#define LV_USE_FS_POSIX 1
 #if LV_USE_FS_POSIX
-    #define LV_FS_POSIX_LETTER '\0'     /*Set an upper cased letter on which the drive will accessible (e.g. 'A')*/
+    #define LV_FS_POSIX_LETTER 'A'      /*Set an upper cased letter on which the drive will accessible (e.g. 'A')*/
     #define LV_FS_POSIX_PATH ""         /*Set the working directory. File/directory paths will be appended to it.*/
     #define LV_FS_POSIX_CACHE_SIZE 0    /*>0 to cache this number of bytes in lv_fs_read()*/
 #endif

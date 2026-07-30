@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
+#include <string>
 #include <vector>
 #include <sys/time.h>
 
@@ -39,9 +41,12 @@
 
 #include "board_config.h"
 #include "deck.h"
+#include "deck_registry.h"
 #include "devctl.h"
 #include "fsrs.h"
+#include "home_ui.h"
 #include "persist.h"
+#include "power.h"
 #include "review_ui.h"
 #include "session.h"
 
@@ -77,10 +82,46 @@ constexpr const char* kMountPoint = "/data";
 constexpr const char* kPartitionLabel = "storage";
 constexpr const char* kReviewLogPath = "/data/revlog.bin";
 constexpr const char* kTimePath = "/data/lastknowntime.bin";
+constexpr const char* kDecksDir = "/data/decks";
+constexpr const char* kFontsDir = "/data/fonts";
 bool g_fs_ok = false;
 
+// Vietnam, UTC+7 -- matches session.h's own default and every other place
+// "now" is turned into a local day/hour in this file.
+constexpr int kUtcOffsetSeconds = 7 * 3600;
+
+fsrs::Parameters g_params;
+session::Limits g_limits;
+
+// One entry per deck found under /data/decks/*.srs, or exactly one entry
+// for the embedded fallback deck if that directory is missing or empty (see
+// docs/sync-protocol.md). This is the model behind the home screen's deck
+// picker: home_ui only ever sees names and counts, never files.
+struct DeckSlot {
+  std::string slug;
+  std::string name;
+  std::string lang = "zh";
+  std::string path;    // empty when embedded
+  bool embedded = false;
+};
+std::vector<DeckSlot> g_slots;
+
+// The whole review log, replayed once at boot. Re-replaying this (cheap,
+// see docs/sync-protocol.md's "hundreds of cards" note) into a throwaway
+// Session per deck is how per-deck counts are computed on the home screen,
+// and into the real Session below whenever a deck is opened.
+std::vector<session::ReviewEntry> g_log_entries;
+
 deck::Deck g_deck;
+// Owns the bytes of whichever non-embedded deck is currently open; deck::Deck
+// never copies out of its backing buffer (see deck.h), so this must outlive
+// every Card view built from g_deck. Unused (and cleared) while the embedded
+// deck is open, since that one lives in flash for the process lifetime.
+std::vector<uint8_t> g_deck_bytes;
+std::unique_ptr<session::Session> g_session_owner;
 session::Session* g_session = nullptr;
+int g_open_slot = -1;
+
 int g_current = -1;
 bool g_revealed = false;
 // Seeded at boot from the replayed review log (see persist::reviewed_today),
@@ -454,7 +495,7 @@ void touch_init() {
 // Review loop
 
 void refresh_counts() {
-  const auto c = g_session->counts(now_seconds(), 7 * 3600);
+  const auto c = g_session->counts(now_seconds(), kUtcOffsetSeconds);
   ui::set_counts({c.learning, c.due, c.fresh});
 }
 
@@ -481,7 +522,7 @@ void show_current() {
 }
 
 void advance() {
-  g_current = g_session->next_card(now_seconds(), 7 * 3600);
+  g_current = g_session->next_card(now_seconds(), kUtcOffsetSeconds);
   g_revealed = false;
   refresh_counts();
   show_current();
@@ -517,10 +558,219 @@ void on_grade(int rating) {
   }
 
   g_reviewed_today++;
+  // Kept alongside the persisted file so the home screen's per-deck counts
+  // (see on_home_refresh()) stay correct for every *other* deck within this
+  // boot without re-reading revlog.bin. The currently open deck's own counts
+  // come straight from g_session->counts() instead, which is already live.
+  g_log_entries.push_back(entry);
   ESP_LOGI(TAG, "graded id=%016" PRIx64 " rating=%d  (log now %zu entries)",
            entry.card_id, rating, g_session->log().size());
   (void)card;
   advance();
+}
+
+// ---------------------------------------------------------------------------
+// Multi-deck registry and home-screen glue.
+//
+// See docs/sync-protocol.md: content lives at /data/decks/*.srs, one deck
+// per file, falling back to the deck embedded in the app image (treated as
+// slug "hsk1-2") when that directory is missing or empty. The global
+// revlog.bin serves every deck because card ids embed the deck slug, so
+// replaying the whole log into any one deck's Session harmlessly skips
+// every entry belonging to a different deck (Session::index_of returns -1
+// for them) -- see deck_registry.h.
+
+// Populates g_slots. Called once at boot; the picker doesn't hot-reload
+// (pushed content is only picked up at boot/@reboot, same as everything else
+// under /data, see docs/sync-protocol.md).
+void scan_decks() {
+  g_slots.clear();
+  std::vector<deck::DeckFile> files;
+  if (g_fs_ok) files = deck::scan(kDecksDir);
+
+  if (files.empty()) {
+    DeckSlot slot;
+    slot.slug = "hsk1-2";
+    slot.name = "HSK 1-2";
+    slot.lang = "zh";
+    slot.embedded = true;
+    g_slots.push_back(slot);
+    ESP_LOGI(TAG, "no decks under %s; using the embedded fallback deck", kDecksDir);
+    return;
+  }
+
+  for (const auto& f : files) {
+    std::vector<uint8_t> bytes;
+    if (!deck::read_file(f.path.c_str(), &bytes)) {
+      ESP_LOGW(TAG, "could not read %s; skipping", f.path.c_str());
+      continue;
+    }
+    deck::Deck d;
+    const auto err = d.open(bytes.data(), bytes.size(), /*verify_crc=*/true);
+    if (err != deck::Error::None) {
+      ESP_LOGW(TAG, "%s: %s; skipping", f.path.c_str(), deck::error_string(err));
+      continue;
+    }
+    const auto meta = deck::parse_meta(d.meta(), d.meta_len());
+    DeckSlot slot;
+    slot.slug = meta.slug.empty() ? f.slug : meta.slug;
+    slot.name = meta.name.empty() ? slot.slug : meta.name;
+    slot.lang = meta.lang;
+    slot.path = f.path;
+    slot.embedded = false;
+    g_slots.push_back(slot);
+    ESP_LOGI(TAG, "found deck %s: name=\"%s\" lang=%s cards=%zu", slot.slug.c_str(),
+             slot.name.c_str(), slot.lang.c_str(), d.count());
+  }
+
+  if (g_slots.empty()) {
+    // Every file under decks/ failed to open. Fall back exactly as if the
+    // directory had been empty, rather than leaving the picker with nothing
+    // to show and no way to review anything.
+    ESP_LOGW(TAG, "every file under %s failed to open; falling back to the embedded deck",
+             kDecksDir);
+    DeckSlot slot;
+    slot.slug = "hsk1-2";
+    slot.name = "HSK 1-2";
+    slot.lang = "zh";
+    slot.embedded = true;
+    g_slots.push_back(slot);
+  }
+}
+
+// Opens g_slots[index] as the live deck: rebuilds g_deck over its bytes (or
+// the embedded image), then a fresh Session replayed from g_log_entries.
+// Does not touch g_current/advance() -- the caller decides when to show a
+// card.
+bool open_deck(int index) {
+  if (index < 0 || static_cast<size_t>(index) >= g_slots.size()) return false;
+  const auto& slot = g_slots[index];
+
+  deck::Error err;
+  if (slot.embedded) {
+    g_deck_bytes.clear();
+    g_deck_bytes.shrink_to_fit();
+    const size_t deck_size = static_cast<size_t>(kDeckEnd - kDeckStart);
+    err = g_deck.open(kDeckStart, deck_size, /*verify_crc=*/true);
+  } else {
+    if (!deck::read_file(slot.path.c_str(), &g_deck_bytes)) {
+      ESP_LOGE(TAG, "failed to read %s", slot.path.c_str());
+      return false;
+    }
+    err = g_deck.open(g_deck_bytes.data(), g_deck_bytes.size(), /*verify_crc=*/true);
+  }
+  if (err != deck::Error::None) {
+    ESP_LOGE(TAG, "deck %s failed to open: %s", slot.slug.c_str(), deck::error_string(err));
+    return false;
+  }
+
+  g_session_owner = std::make_unique<session::Session>(g_deck, g_params, g_limits);
+  g_session_owner->replay(g_log_entries.data(), g_log_entries.size());
+  g_session = g_session_owner.get();
+  g_open_slot = index;
+  g_current = -1;
+  g_revealed = false;
+
+  ui::set_deck_name(slot.name.c_str());
+  ui::set_lang(slot.lang.c_str());
+  ESP_LOGI(TAG, "opened deck %s: %zu cards", slot.slug.c_str(), g_deck.count());
+  return true;
+}
+
+// Runs review on g_slots[index]: opens it, then shows its first due/new card.
+void go_review(int index) {
+  if (!open_deck(index)) return;
+  advance();
+  lv_screen_load(ui::screen());
+}
+
+void go_home();  // forward decl; on_back() needs it before its definition below
+
+void on_home_select(int index) { go_review(index); }
+
+void on_back() {
+  go_home();
+}
+
+// Recomputes every deck's queue counts and the status bar, then pushes them
+// to home_ui. Called once at boot and then ~once a minute by home_ui's own
+// internal timer (see home_ui.h's set_refresh_callback() doc comment) plus
+// once more whenever the user returns from a review session, so counts
+// never look stale just because nobody happened to wait for the next tick.
+void on_home_refresh() {
+  const int64_t now = now_seconds();
+
+  home::Status status;
+  struct std::tm local {};
+  const std::time_t t = static_cast<std::time_t>(now + kUtcOffsetSeconds);
+  gmtime_r(&t, &local);  // already shifted by kUtcOffsetSeconds above, so read as if UTC
+  if (local.tm_year + 1900 >= 2020) {
+    status.hour = local.tm_hour;
+    status.minute = local.tm_min;
+  }  // else leave hour/minute at -1: clock unset, home_ui shows "--:--"
+  status.battery_percent = power::battery_percent();
+  status.charging = power::charging();
+  home::set_status(status);
+
+  static home::DeckRow rows[16];
+  int n = 0;
+  for (size_t i = 0; i < g_slots.size() && n < 16; ++i, ++n) {
+    session::Counts c;
+    if (static_cast<int>(i) == g_open_slot && g_session != nullptr) {
+      c = g_session->counts(now, kUtcOffsetSeconds);  // live: reflects grades made this boot
+    } else if (g_slots[i].embedded) {
+      // Same embedded bytes open_deck() would use; loaded here as a
+      // throwaway Deck purely to compute counts (see deck_registry.h).
+      deck::Deck d;
+      const size_t deck_size = static_cast<size_t>(kDeckEnd - kDeckStart);
+      if (d.open(kDeckStart, deck_size, /*verify_crc=*/false) == deck::Error::None) {
+        c = deck::counts_for(d, g_params, g_limits, g_log_entries, now, kUtcOffsetSeconds);
+      }
+    } else {
+      std::vector<uint8_t> bytes;
+      deck::Deck d;
+      if (deck::read_file(g_slots[i].path.c_str(), &bytes) &&
+          d.open(bytes.data(), bytes.size(), /*verify_crc=*/false) == deck::Error::None) {
+        c = deck::counts_for(d, g_params, g_limits, g_log_entries, now, kUtcOffsetSeconds);
+      }
+    }
+    rows[n].name = g_slots[i].name.c_str();
+    rows[n].fresh = c.fresh;
+    rows[n].learning = c.learning;
+    rows[n].due = c.due;
+  }
+  home::set_decks(rows, n);
+}
+
+void go_home() {
+  on_home_refresh();
+  lv_screen_load(home::screen());
+}
+
+// Loads one runtime CJK font if it's been pushed to flash, else leaves the
+// compiled-in subset in place (see review_ui.h's set_fonts() doc comment).
+// LVGL's binfont loader (lv_binfont_create(), see lvgl.h) works through the
+// LV_USE_FS_POSIX driver mounted on drive letter 'A' (see sdkconfig.defaults
+// and CLAUDE.md's "put calibration on the device" spirit applied to
+// fonts: this is loaded once at boot rather than hot-reloaded, since a font
+// push always ends in a @reboot anyway).
+const lv_font_t* try_load_font(int size) {
+  char path[48];
+  std::snprintf(path, sizeof(path), "A:%s/font_cjk_%d.bin", kFontsDir, size);
+  lv_font_t* f = lv_binfont_create(path);
+  if (!f) {
+    ESP_LOGI(TAG, "no runtime font at %s; using the compiled-in font_cjk_%d", path, size);
+    return nullptr;
+  }
+  ESP_LOGI(TAG, "loaded runtime font %s", path);
+  return f;
+}
+
+void load_runtime_fonts() {
+  if (!g_fs_ok) return;  // nothing under /data to load without a mounted filesystem
+  const lv_font_t* f16 = try_load_font(16);
+  ui::set_fonts(try_load_font(48), try_load_font(28), try_load_font(20), f16);
+  home::set_name_font(f16);
 }
 
 // ---------------------------------------------------------------------------
@@ -662,24 +912,12 @@ extern "C" void app_main() {
   touch_init();
   backlight_init(85);
 
-  // --- deck ---------------------------------------------------------------
-  const size_t deck_size = static_cast<size_t>(kDeckEnd - kDeckStart);
-  const auto err = g_deck.open(kDeckStart, deck_size, /*verify_crc=*/true);
-  if (err != deck::Error::None) {
-    ESP_LOGE(TAG, "deck failed to load: %s", deck::error_string(err));
-    return;
-  }
-  ESP_LOGI(TAG, "deck loaded: %zu cards, %zu bytes", g_deck.count(), deck_size);
-
-  static fsrs::Parameters params;
-  static session::Limits limits;
-  static session::Session sess(g_deck, params, limits);
-  g_session = &sess;
-
   // --- review log replay ---------------------------------------------------
-  // The review log is the source of truth (see session.h): CardState is
-  // rebuilt here from scratch, before the first card is ever shown, rather
-  // than trusting any state left over from before the reboot.
+  // Loaded once, before any deck is opened: g_log_entries is what every
+  // Session (the real one and the throwaway per-deck ones the home screen
+  // uses for counts) gets replayed from. The review log is the source of
+  // truth (see session.h) -- nothing here trusts state left over from
+  // before the reboot.
   if (g_fs_ok) {
     const auto loaded = persist::load(kReviewLogPath);
     if (!loaded.header_ok) {
@@ -695,8 +933,7 @@ extern "C" void app_main() {
           ESP_LOGW(TAG, "could not truncate the partial tail; future appends may misalign");
         }
       }
-      std::vector<session::ReviewEntry> replay_entries;
-      replay_entries.reserve(loaded.entries.size());
+      g_log_entries.reserve(loaded.entries.size());
       for (const auto& e : loaded.entries) {
         session::ReviewEntry re;
         re.card_id = e.card_id;
@@ -704,29 +941,38 @@ extern "C" void app_main() {
         re.rating = e.rating;
         re.state_before = e.state_before;
         re.duration_ms = e.duration_ms;
-        replay_entries.push_back(re);
+        g_log_entries.push_back(re);
       }
-      sess.replay(replay_entries.data(), replay_entries.size());
-      g_reviewed_today = persist::reviewed_today(loaded.entries, now_seconds(), 7 * 3600);
+      g_reviewed_today = persist::reviewed_today(loaded.entries, now_seconds(), kUtcOffsetSeconds);
       ESP_LOGI(TAG, "replayed %zu review-log entries from flash; %d reviewed today",
-               replay_entries.size(), g_reviewed_today);
+               g_log_entries.size(), g_reviewed_today);
     }
   }
+
+  // --- decks ----------------------------------------------------------------
+  scan_decks();
 
   // --- UI -----------------------------------------------------------------
   lvgl_port_lock(0);
   ui::init(UI_H_RES, UI_V_RES);
-
-  ui::set_deck_name("HSK 1-2");
   ui::set_callbacks(on_reveal, on_grade);
-  advance();
+  ui::set_back_callback(on_back);
+  load_runtime_fonts();
+
+  home::init(UI_H_RES, UI_V_RES);
+  home::set_select_callback(on_home_select);
+  home::set_refresh_callback(on_home_refresh);
+  // home::init() calls lv_screen_load() last, so this is what's actually on
+  // the glass after this block -- the deck picker, not a review screen with
+  // nothing loaded into it yet.
+  go_home();
   lvgl_port_unlock();
 
   devctl::init(start_calibration, on_time_synced, on_gap_adjust);
 
   xTaskCreate(button_task, "buttons", 4096, nullptr, 3, nullptr);
 
-  ESP_LOGI(TAG, "ready — tap the screen to reveal, then grade");
+  ESP_LOGI(TAG, "ready — pick a deck, tap the screen to reveal, then grade");
 
   int beat = 0;
   while (true) {

@@ -12,6 +12,7 @@ add_subdirectory(${ROOT}/third_party/lvgl ${CMAKE_BINARY_DIR}/lvgl)
 add_executable(srs_sim
     main.cpp
     ${ROOT}/firmware/components/ui/review_ui.cpp
+    ${ROOT}/firmware/components/ui/home_ui.cpp
     ${ROOT}/firmware/main/fonts/font_cjk_16.c
     ${ROOT}/firmware/main/fonts/font_cjk_20.c
     ${ROOT}/firmware/main/fonts/font_cjk_28.c
@@ -23,5 +24,7 @@ target_include_directories(srs_sim PRIVATE
     ${ROOT}/firmware/components/deck/include
     ${ROOT}/firmware/components/fsrs/include
     ${ROOT}/firmware/components/session/include
+    ${ROOT}/firmware/components/persist/include
+    ${ROOT}/firmware/components/power/include
 )
 target_link_libraries(srs_sim PRIVATE lvgl)

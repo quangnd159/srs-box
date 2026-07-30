@@ -25,7 +25,7 @@ cmake --build "$HERE/build" -j8 >/dev/null
 
 mkdir -p "$HERE/out"
 rm -f "$HERE/out"/*.raw "$HERE/out"/*.png
-"$HERE/build/srs_sim" --size "$W" "$H" --out "$HERE/out"
+"$HERE/build/srs_sim" --size "$W" "$H" --out "$HERE/out" --decks-dir "$ROOT/decks"
 
 "$ROOT/.venv/bin/python" - "$HERE/out" "$W" "$H" <<'PY'
 import sys, pathlib

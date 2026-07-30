@@ -57,4 +57,32 @@ using RevealCallback = void (*)();
 using GradeCallback = void (*)(int rating);
 void set_callbacks(RevealCallback on_reveal, GradeCallback on_grade);
 
+// Small "<-" tap target in the top-left corner, for returning to the deck
+// picker (home screen). Deliberately touch-only: the physical buttons keep
+// their existing meaning exactly as before (minus/plus grade, any-button
+// reveals), and the power button must stay inert here beyond its existing
+// short-press role -- see docs/pinout.md.
+using BackCallback = void (*)();
+void set_back_callback(BackCallback on_back);
+
+// Which language the open deck is in, e.g. "zh" or "fr". Gates pinyin tone
+// colouring of the reading line (docs/sync-protocol.md): only lang "zh" (or
+// absent, which parse_meta() defaults to "zh") gets per-syllable tone
+// colours; every other language renders the reading in one neutral colour.
+// Call before show_card(); "zh" is the default, so a caller that never calls
+// this (e.g. the simulator's fixed HSK 1-2 scenes) gets tone colouring for
+// free rather than silently losing it.
+void set_lang(const char* lang);
+
+// Runtime CJK fonts pushed to /data/fonts/ (docs/sync-protocol.md) replace
+// the compiled-in subset when present. Pass nullptr for any size to keep the
+// compiled-in font for that size -- this is also what happens before this is
+// ever called, so it's safe to skip entirely when no runtime fonts loaded.
+void set_fonts(const lv_font_t* f48, const lv_font_t* f28, const lv_font_t* f20,
+               const lv_font_t* f16);
+
+// Returns the LVGL screen object review_ui builds into, for switching
+// between it and the home screen with lv_screen_load(). Valid after init().
+lv_obj_t* screen();
+
 }  // namespace ui
