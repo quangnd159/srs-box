@@ -17,6 +17,10 @@ namespace devctl {
 // no RTC on this board (see CLAUDE.md), so main.cpp uses this hook to
 // persist the value immediately rather than waiting for the next periodic
 // tick, in case power is lost soon after.
-void init(void (*on_cal)() = nullptr, void (*on_time_set)(int64_t epoch_seconds) = nullptr);
+// `on_gap`, if given, runs when the host sends @gap <y>: it applies a new
+// panel y-offset live, for aligning the write window to the glass without
+// reflashing (the "put calibration on the device" lesson).
+void init(void (*on_cal)() = nullptr, void (*on_time_set)(int64_t epoch_seconds) = nullptr,
+          void (*on_gap)(int y_gap) = nullptr);
 
 }  // namespace devctl

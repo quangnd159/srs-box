@@ -9,6 +9,7 @@ same link, distinguished by a leading '@' so it never collides with log output.
                    @swipe <x1> <y1> <x2> <y2> <ms>
                    @ping
                    @time <unix_epoch_seconds>
+                   @gap <y>
 
   device -> host   @ok <text> | @err <text>
                    @shot <w> <h> <fmt> <nbytes>\n followed by nbytes raw pixels
@@ -24,6 +25,7 @@ Usage:
   devctl.py tap X Y
   devctl.py swipe X1 Y1 X2 Y2 [ms]
   devctl.py time
+  devctl.py gap Y
   devctl.py reset
 """
 import argparse
@@ -186,6 +188,10 @@ def main() -> None:
 
     tm = sub.add_parser("time", help="send the host's current clock to the device")
     tm.set_defaults(func=lambda a: _simple(a, f"@time {int(time.time())}\n".encode()))
+
+    g = sub.add_parser("gap", help="set the panel y-offset live (alignment calibration)")
+    g.add_argument("y", type=int)
+    g.set_defaults(func=lambda a: _simple(a, f"@gap {a.y}\n".encode()))
 
     r = sub.add_parser("reset", help="reboot the device")
     r.set_defaults(func=lambda a: hard_reset(open_port(a.port)))

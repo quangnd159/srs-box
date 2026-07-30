@@ -9,6 +9,7 @@
 #   ./dev tap X Y         inject a touch at (X, Y)
 #   ./dev swipe X1 Y1 X2 Y2 [ms]
 #   ./dev synctime        send the host's clock to the device (no RTC onboard)
+#   ./dev gap Y           set the panel y-offset live (alignment calibration)
 #   ./dev reset           reboot the device
 #   ./dev pins            recover the board pin map over JTAG
 #   ./dev buttons         find which GPIOs the buttons use (press them when asked)
@@ -126,6 +127,7 @@ case "${1:-doctor}" in
   tap)     shift || true; cmd_devctl tap "$@" ;;
   swipe)   shift || true; cmd_devctl swipe "$@" ;;
   synctime) shift || true; cmd_devctl time ;;
+  gap)     shift || true; cmd_devctl gap "$@" ;;
   reset)   shift || true; cmd_devctl reset ;;
   pins)    shift || true; ensure_venv; "$PY" "$ROOT/tools/readpins.py" "$@" ;;
   buttons) shift || true; ensure_venv; "$PY" "$ROOT/tools/findbuttons.py" "$@" ;;

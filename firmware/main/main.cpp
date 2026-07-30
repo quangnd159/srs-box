@@ -23,6 +23,7 @@
 #include <driver/ledc.h>
 #include <driver/spi_master.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_panel_vendor.h>
@@ -165,6 +166,19 @@ void on_time_synced(int64_t epoch) {
   persist_time_now();
 }
 
+// Runs when the host sends @gap <y>: apply a new panel y-offset live and
+// force a full redraw so the whole window lands at the new position. For
+// finding the exact write-window/glass alignment without reflashing; once
+// settled the value belongs in LCD_OFFSET_Y.
+void on_gap_adjust(int y_gap) {
+  esp_lcd_panel_set_gap(g_panel, LCD_OFFSET_X, y_gap);
+  if (lvgl_port_lock(pdMS_TO_TICKS(1000))) {
+    lv_obj_invalidate(lv_screen_active());
+    lvgl_port_unlock();
+  }
+  ESP_LOGI(TAG, "panel y_gap set to %d via @gap", y_gap);
+}
+
 // If the system clock still reads as unset (this board has no RTC, so every
 // boot starts at the newlib default of 1970), restore whatever time was last
 // persisted. This can only make cards read as due *later* than they truly
@@ -281,6 +295,25 @@ void display_init() {
   ok("esp_lcd_new_panel_nv3023", esp_lcd_new_panel_nv3023(io, &panel_cfg, &g_panel));
   ok("esp_lcd_panel_reset", esp_lcd_panel_reset(g_panel));
   ok("esp_lcd_panel_init", esp_lcd_panel_init(g_panel));
+
+  // Clear ALL of GRAM, not just our window. The controller has 320 rows but
+  // we only ever write 284 of them; the rest keep their power-on noise, and
+  // any row of it inside the visible area shows as a static strip at the
+  // panel edge. Done before disp_on so the noise is never visible, and while
+  // the gap is still 0 so coordinates address raw GRAM.
+  {
+    constexpr int kGramRows = LCD_OFFSET_Y + LCD_V_RES;  // 320, full GRAM
+    constexpr int kRowsPerChunk = 20;
+    const size_t chunk_px = static_cast<size_t>(LCD_H_RES) * kRowsPerChunk;
+    uint16_t* black = static_cast<uint16_t*>(heap_caps_calloc(chunk_px, 2, MALLOC_CAP_DMA));
+    if (black != nullptr) {
+      for (int y = 0; y < kGramRows; y += kRowsPerChunk) {
+        esp_lcd_panel_draw_bitmap(g_panel, 0, y, LCD_H_RES, y + kRowsPerChunk, black);
+      }
+      heap_caps_free(black);
+    }
+  }
+
   ok("esp_lcd_panel_disp_on_off", esp_lcd_panel_disp_on_off(g_panel, true));
 
   // --- LVGL ---------------------------------------------------------------
@@ -669,7 +702,7 @@ extern "C" void app_main() {
   advance();
   lvgl_port_unlock();
 
-  devctl::init(start_calibration, on_time_synced);
+  devctl::init(start_calibration, on_time_synced, on_gap_adjust);
 
   xTaskCreate(button_task, "buttons", 4096, nullptr, 3, nullptr);
 

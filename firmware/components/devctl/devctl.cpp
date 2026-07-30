@@ -224,6 +224,7 @@ void handle_shot() {
 
 void (*g_cal_cb)() = nullptr;
 void (*g_time_cb)(int64_t) = nullptr;
+void (*g_gap_cb)(int) = nullptr;
 
 void handle_line(char* line) {
   if (std::strcmp(line, "@ping") == 0) {
@@ -252,6 +253,20 @@ void handle_line(char* line) {
   if (std::sscanf(line, "@swipe %d %d %d %d %d", &x1, &y1, &x2, &y2, &ms) == 5) {
     queue_swipe(x1, y1, x2, y2, ms);
     reply_ok("swipe queued");
+    return;
+  }
+  // Live panel y-offset adjustment, for aligning the write window to the
+  // glass without a reflash. Takes effect on the next full redraw.
+  int y_gap;
+  if (std::sscanf(line, "@gap %d", &y_gap) == 1) {
+    if (g_gap_cb == nullptr) {
+      reply_err("no gap handler registered");
+    } else if (y_gap < 0 || y_gap > 64) {
+      reply_err("gap out of range (0..64)");
+    } else {
+      g_gap_cb(y_gap);
+      reply_ok("gap set");
+    }
     return;
   }
   // There is no RTC on this board (see CLAUDE.md): the clock starts every
@@ -306,9 +321,10 @@ void rx_task(void*) {
 
 }  // namespace
 
-void init(void (*on_cal)(), void (*on_time_set)(int64_t)) {
+void init(void (*on_cal)(), void (*on_time_set)(int64_t), void (*on_gap)(int)) {
   g_cal_cb = on_cal;
   g_time_cb = on_time_set;
+  g_gap_cb = on_gap;
   usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
   // The default 256-byte TX ring buffer cannot hold a @shot chunk (writes
   // larger than an item the ring can hold fail immediately, they don't block).
@@ -333,7 +349,7 @@ void init(void (*on_cal)(), void (*on_time_set)(int64_t)) {
   }
 
   xTaskCreate(rx_task, "devctl_rx", 6144, nullptr, 3, nullptr);
-  ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe, @time)");
+  ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe, @time, @gap)");
 }
 
 }  // namespace devctl
