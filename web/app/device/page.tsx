@@ -13,6 +13,24 @@ const STATUS_CLASS: Record<SyncStatus, string> = {
   unknown: "text-zinc-500",
 };
 
+/** User-facing text for each SyncStatus; kept separate from the union value
+ * itself so this can be reworded without touching the store or its tests. */
+const STATUS_LABEL: Record<SyncStatus, string> = {
+  "in sync": "in sync",
+  outdated: "outdated",
+  "not local": "not in this browser",
+  "not on device": "not on device",
+  unknown: "unknown",
+};
+
+const STATUS_TITLE: Record<SyncStatus, string> = {
+  "in sync": "This browser's copy compiles to exactly the file on the device.",
+  outdated: "This browser's copy differs from what is on the device.",
+  "not local": "On the device, but this browser has no editable copy. Import it to edit or re-push.",
+  "not on device": "A local deck that has not been pushed yet.",
+  unknown: "Could not compare (deck failed to parse or compile).",
+};
+
 function formatDrift(seconds: number): string {
   const abs = Math.abs(seconds);
   if (abs < 2) return "in step with this computer";
@@ -106,6 +124,10 @@ export default function DevicePage() {
 
   function handlePullRevlog() {
     void connectionStore.pullRevlog();
+  }
+
+  function handleImportDeck(slug: string) {
+    void connectionStore.importDeck(slug);
   }
 
   return (
@@ -237,9 +259,13 @@ export default function DevicePage() {
               {rows.map((row) => (
                 <tr key={row.slug} className="border-b border-zinc-100 align-top dark:border-zinc-900">
                   <td className="py-2 pr-2">
-                    <Link href={`/decks/${row.slug}`} className="font-medium hover:underline">
-                      {row.name}
-                    </Link>
+                    {row.local || row.localError ? (
+                      <Link href={`/decks/${row.slug}`} className="font-medium hover:underline">
+                        {row.name}
+                      </Link>
+                    ) : (
+                      <span className="font-medium">{row.name}</span>
+                    )}
                     <p className="text-xs text-zinc-500">
                       {row.slug}
                       {row.lang && ` · ${row.lang}`}
@@ -258,7 +284,12 @@ export default function DevicePage() {
                       ? `${row.counts.due} due · ${row.counts.learning} learning · ${row.counts.fresh} new`
                       : "—"}
                   </td>
-                  <td className={`py-2 pr-2 text-xs ${STATUS_CLASS[row.status]}`}>{row.status}</td>
+                  <td
+                    className={`py-2 pr-2 text-xs ${STATUS_CLASS[row.status]}`}
+                    title={STATUS_TITLE[row.status]}
+                  >
+                    {STATUS_LABEL[row.status]}
+                  </td>
                   <td className="py-2">
                     <div className="flex gap-2">
                       {row.local && (
@@ -268,6 +299,14 @@ export default function DevicePage() {
                           className="rounded border border-zinc-300 px-2 py-1 text-xs disabled:opacity-40 dark:border-zinc-700"
                         >
                           Push
+                        </button>
+                      )}
+                      {row.status === "not local" && (
+                        <button
+                          onClick={() => handleImportDeck(row.slug)}
+                          className="rounded border border-zinc-300 px-2 py-1 text-xs dark:border-zinc-700"
+                        >
+                          Import to this browser
                         </button>
                       )}
                       {row.device && (

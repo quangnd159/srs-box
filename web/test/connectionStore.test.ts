@@ -5,6 +5,9 @@
 // mock duplex stream (test/mockDuplex.ts) standing in for a device, per
 // CLAUDE.md's "you cannot test WebSerial against real hardware" note.
 import { describe, expect, test } from "bun:test";
+import { buildDeck } from "../lib/compiler/build";
+import { crc32 } from "../lib/compiler/crc32";
+import { DeckStore, MemoryStore } from "../lib/deck/store";
 import {
   ConnectionStore,
   type ConnectionEnvironment,
@@ -79,6 +82,41 @@ async function runFakeDevice(device: SerialTransport, opts: { hangOnFls?: boolea
 
 function emptyDeckSource() {
   return { listDecks: () => [], getCards: () => [] };
+}
+
+/** Like runFakeDevice, but serves a fixed set of `decks/*.srs` files over @fls/@fget. */
+async function runFakeDeviceWithFiles(device: SerialTransport, files: Map<string, Uint8Array>): Promise<void> {
+  const reader = new LineReader(device);
+  for (;;) {
+    let line: string;
+    try {
+      line = await reader.readLine();
+    } catch {
+      return;
+    }
+    if (line.startsWith("@time")) {
+      await writeLine(device, "@ok time");
+    } else if (line === "@stat") {
+      await writeLine(device, '@ok stat {"time":1000,"reviews_today":0,"decks":[]}');
+    } else if (line === "@fls") {
+      const listing = [...files.entries()].map(([path, data]) => `${path}=${data.length}`).join(" ");
+      await writeLine(device, `@ok fls ${listing}`.trimEnd());
+    } else if (line.startsWith("@fget ")) {
+      const path = line.slice("@fget ".length).trim();
+      const data = files.get(path);
+      if (!data) {
+        await writeLine(device, "@err no such file");
+        continue;
+      }
+      const crcHex = crc32(data).toString(16).padStart(8, "0");
+      await writeLine(device, `@fget ${data.length} ${crcHex}`);
+      await device.write(data);
+    } else if (line === "@ping") {
+      await writeLine(device, "@ok pong");
+    } else if (line === "@reboot") {
+      await writeLine(device, "@ok rebooting");
+    }
+  }
 }
 
 describe("ConnectionStore", () => {
@@ -258,5 +296,72 @@ describe("ConnectionStore", () => {
 
     await store.connect(); // must be retryable, not wedged
     expect(store.getSnapshot().log.filter((l) => l.kind === "error").length).toBe(2);
+  });
+});
+
+describe("ConnectionStore.importDeck", () => {
+  /** A deck with a syllable-separated (U+001F) reading, matching what a
+   * real zh deck stores on the device. */
+  async function buildFixtureDeck(): Promise<Uint8Array> {
+    const built = await buildDeck(
+      [{ front: "有时候", reading: "yǒushíhou", back: "sometimes", numeric: "you3shi2hou5" }],
+      { name: "Vocab", slug: "vocab", lang: "zh" },
+    );
+    return built.bytes;
+  }
+
+  test("imports a device-only deck, preserving the U+001F reading verbatim, and the row flips to in sync", async () => {
+    const kv = new MemoryStore();
+    const deckSource = () => new DeckStore(kv);
+    const deckBytes = await buildFixtureDeck();
+
+    const fake = makeFakeTransport();
+    void runFakeDeviceWithFiles(fake.device, new Map([["decks/vocab.srs", deckBytes]]));
+    const env: ConnectionEnvironment = { requestAndOpen: async () => fake.handle, autoConnect: async () => null };
+    const store = new ConnectionStore({ env, deckSource, kv: () => kv });
+
+    await store.connect();
+    const before = store.getSnapshot().rows?.find((r) => r.slug === "vocab");
+    expect(before?.status).toBe("not local");
+
+    await store.importDeck("vocab");
+
+    const localCards = new DeckStore(kv).getCards("vocab");
+    expect(localCards).toHaveLength(1);
+    expect(localCards[0].front).toBe("有时候");
+    expect(localCards[0].reading).toContain("");
+    expect(localCards[0].reading).toBe("yǒushíhou");
+    expect(localCards[0].numeric).toBeUndefined();
+
+    const after = store.getSnapshot().rows?.find((r) => r.slug === "vocab");
+    expect(after?.status).toBe("in sync");
+    expect(store.getSnapshot().log.some((l) => l.text.includes("imported vocab"))).toBe(true);
+  });
+
+  test("refuses to import over an existing local slug, logs an error, and leaves the existing deck untouched", async () => {
+    const kv = new MemoryStore();
+    const deckSource = () => new DeckStore(kv);
+    const deckBytes = await buildFixtureDeck();
+
+    // A local deck already occupies the "vocab" slug, with its own cards.
+    const preexisting = new DeckStore(kv);
+    preexisting.createDeck({ name: "My Vocab", slug: "vocab", lang: "zh" });
+    preexisting.addCards("vocab", [{ localId: "x1", front: "existing", reading: "", back: "" }]);
+
+    const fake = makeFakeTransport();
+    void runFakeDeviceWithFiles(fake.device, new Map([["decks/vocab.srs", deckBytes]]));
+    const env: ConnectionEnvironment = { requestAndOpen: async () => fake.handle, autoConnect: async () => null };
+    const store = new ConnectionStore({ env, deckSource, kv: () => kv });
+
+    await store.connect();
+    await store.importDeck("vocab");
+
+    const cards = new DeckStore(kv).getCards("vocab");
+    expect(cards).toHaveLength(1);
+    expect(cards[0].front).toBe("existing"); // untouched, not overwritten
+
+    expect(
+      store.getSnapshot().log.some((l) => l.kind === "error" && l.text.includes("already exists")),
+    ).toBe(true);
   });
 });

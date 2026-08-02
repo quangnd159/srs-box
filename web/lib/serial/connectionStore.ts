@@ -20,7 +20,7 @@
 // guarantees a stuck command always ends with an error line and `busy`
 // cleared, never a silently-wedged UI.
 import { buildDeck } from "@/lib/compiler/build";
-import { parseDeck } from "@/lib/compiler/parse-srs";
+import { parseDeck, type ParsedCard } from "@/lib/compiler/parse-srs";
 import type { BuildResult } from "@/lib/compiler/types";
 import { browserStore, DeckStore, type KeyValueStore } from "@/lib/deck/store";
 import type { Card, Deck } from "@/lib/deck/types";
@@ -47,6 +47,10 @@ export interface DeviceDeck {
   /** Header CRC-32, the whole point of the sync comparison below. */
   crc32: number;
   error?: string;
+  /** The parsed cards themselves, kept around so importDeck() can create a
+   * local copy without a second @fget round trip to the device. Undefined
+   * when `error` is set (nothing to import from an unparseable deck). */
+  parsedCards?: ParsedCard[];
 }
 
 export interface CompiledLocal {
@@ -400,6 +404,7 @@ export class ConnectionStore {
           lang: parsed.meta.lang || "",
           cards: parsed.cards.length,
           crc32: parsed.header.crc32,
+          parsedCards: parsed.cards,
         });
         for (const card of parsed.cards) cardMap.set(card.id, { deckSlug: slug, front: card.front });
       } catch (err) {
@@ -450,6 +455,90 @@ export class ConnectionStore {
       });
     }
     this.rows = merged;
+  }
+
+  /**
+   * Creates a local deck (and its cards) from an already-fetched device
+   * deck, so a browser with no local copy can start editing/pushing it
+   * without the round trip a full refresh would cost. Readings are copied
+   * verbatim, U+001F separators included: readingField() in build.ts passes
+   * a reading through unchanged whenever `numeric` is absent, which it
+   * deliberately is left here, so recompiling reproduces the exact bytes the
+   * device has and the row flips straight to "in sync".
+   *
+   * No serial I/O happens here, so this doesn't go through `run()`'s device
+   * queue; it still must `notify()` on every exit path since it mutates
+   * `rows`.
+   */
+  async importDeck(slug: string): Promise<void> {
+    const row = this.rows?.find((r) => r.slug === slug);
+    if (!row?.device) {
+      this.pushLog(`import ${slug}: no such device deck`, "error");
+      this.notify();
+      return;
+    }
+    if (row.device.error || !row.device.parsedCards) {
+      this.pushLog(`import ${slug}: device deck could not be parsed, nothing to import`, "error");
+      this.notify();
+      return;
+    }
+
+    const store = new DeckStore(this.kv());
+    if (store.getDeck(slug)) {
+      this.pushLog(`import ${slug}: a local deck with this slug already exists, refusing to overwrite`, "error");
+      this.notify();
+      return;
+    }
+
+    store.createDeck({ name: row.device.name, slug: row.device.slug, lang: row.device.lang });
+    const cards: Card[] = row.device.parsedCards.map((c) => ({
+      localId: crypto.randomUUID(),
+      front: c.front,
+      reading: c.reading,
+      back: c.back,
+    }));
+    store.addCards(slug, cards);
+    this.pushLog(`imported ${slug} (${cards.length} cards) to this browser`);
+
+    await this.recomputeRow(slug);
+    this.notify();
+  }
+
+  /**
+   * Recompiles and re-derives sync status for one row against its already
+   * cached device data, without touching the transport. Used after
+   * importDeck() so the row updates to "in sync" without re-fetching the
+   * deck from the device just to compare it against the copy just written.
+   */
+  private async recomputeRow(slug: string): Promise<void> {
+    if (!this.rows) return;
+    const idx = this.rows.findIndex((r) => r.slug === slug);
+    if (idx === -1) return;
+    const row = this.rows[idx];
+
+    const source = this.deckSource();
+    const deck = source.listDecks().find((d) => d.slug === slug);
+    if (!deck) return;
+    const cards = source.getCards(slug).filter((c) => c.front.trim());
+
+    let local: CompiledLocal | string;
+    try {
+      const result = await buildDeck(cards, { name: deck.name, slug: deck.slug, lang: deck.lang });
+      local = { deck, result };
+    } catch (err) {
+      local = (err as Error).message;
+    }
+    const compiled = typeof local === "object" ? local : undefined;
+
+    const updated: DeckRow = {
+      ...row,
+      name: row.device?.name ?? compiled?.deck.name ?? row.name,
+      lang: row.device?.lang ?? compiled?.deck.lang ?? row.lang,
+      local: compiled,
+      localError: typeof local === "string" ? local : undefined,
+      status: row.device ? syncStatus(row.device, local) : "not on device",
+    };
+    this.rows = [...this.rows.slice(0, idx), updated, ...this.rows.slice(idx + 1)];
   }
 
   /**
