@@ -17,6 +17,7 @@ same link, distinguished by a leading '@' so it never collides with log output.
                    @reboot
                    @adc
                    @gpin
+                   @stat
 
   device -> host   @ok <text> | @err <text>
                    @shot <w> <h> <fmt> <nbytes>\n followed by nbytes raw pixels
@@ -53,8 +54,10 @@ Usage:
   devctl.py reboot
   devctl.py adc
   devctl.py gpin
+  devctl.py stat
 """
 import argparse
+import json
 import sys
 import time
 import zlib
@@ -301,6 +304,22 @@ def cmd_reboot(args) -> None:
     _simple(args, b"@reboot\n", sync_time=True)
 
 
+def cmd_stat(args) -> None:
+    """@stat: pretty-print the device's state snapshot (see docs/sync-protocol.md)."""
+    ser = open_port(args.port)
+    ser.reset_input_buffer()
+    ser.write(b"@stat\n")
+    line = _await_reply(ser, timeout=5)
+    if not line.startswith(b"@ok stat "):
+        sys.exit(line.decode(errors="replace") or "device did not ack @stat")
+    payload = line[len(b"@ok stat ") :].decode(errors="replace")
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as e:
+        sys.exit(f"malformed @stat JSON ({e}): {payload}")
+    print(json.dumps(data, indent=2, ensure_ascii=False))
+
+
 def _simple(args, payload: bytes, sync_time: bool = False) -> None:
     ser = open_port(args.port)
     ser.reset_input_buffer()
@@ -394,6 +413,9 @@ def main() -> None:
 
     gp = sub.add_parser("gpin", help="digital snapshot of free GPIOs, for charge-detect (@gpin)")
     gp.set_defaults(func=lambda a: _simple(a, b"@gpin\n"))
+
+    st = sub.add_parser("stat", help="device state snapshot: fw, battery, clock, decks (@stat)")
+    st.set_defaults(func=cmd_stat)
 
     args = ap.parse_args()
     args.func(args)

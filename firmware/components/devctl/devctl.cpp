@@ -872,6 +872,27 @@ void handle_gpinhist(const char* arg) {
 void (*g_cal_cb)() = nullptr;
 void (*g_time_cb)(int64_t) = nullptr;
 void (*g_gap_cb)(int) = nullptr;
+void (*g_stat_cb)(char*, size_t) = nullptr;
+
+// @stat: device-state snapshot for the sync host. The JSON body is built by
+// main.cpp's callback (registered via devctl::init) since it is the only
+// place that knows about deck slots, the review log, and battery status;
+// devctl only wraps it as "@ok stat <json>". A dedicated buffer rather than
+// reply_okf's 256 bytes: a deck list can run well past that once there are a
+// handful of decks, and the instructions explicitly allow a long line here.
+void handle_stat() {
+  if (g_stat_cb == nullptr) {
+    reply_err("no stat handler registered");
+    return;
+  }
+  static char json[2048];
+  json[0] = '\0';
+  g_stat_cb(json, sizeof(json));
+
+  static char out[2048 + 16];
+  const int n = std::snprintf(out, sizeof(out), "@ok stat %s\n", json);
+  write_all(out, n > 0 ? static_cast<size_t>(n) : 0);
+}
 
 void handle_line(char* line) {
   if (std::strcmp(line, "@ping") == 0) {
@@ -897,6 +918,10 @@ void handle_line(char* line) {
   }
   if (std::strcmp(line, "@reboot") == 0) {
     handle_reboot();
+    return;
+  }
+  if (std::strcmp(line, "@stat") == 0) {
+    handle_stat();
     return;
   }
   if (std::strcmp(line, "@adc") == 0) {
@@ -1007,10 +1032,12 @@ void rx_task(void*) {
 
 }  // namespace
 
-void init(void (*on_cal)(), void (*on_time_set)(int64_t), void (*on_gap)(int)) {
+void init(void (*on_cal)(), void (*on_time_set)(int64_t), void (*on_gap)(int),
+          void (*on_stat)(char*, size_t)) {
   g_cal_cb = on_cal;
   g_time_cb = on_time_set;
   g_gap_cb = on_gap;
+  g_stat_cb = on_stat;
   usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
   // The default 256-byte TX ring buffer cannot hold a @shot chunk (writes
   // larger than an item the ring can hold fail immediately, they don't block).
@@ -1041,7 +1068,7 @@ void init(void (*on_cal)(), void (*on_time_set)(int64_t), void (*on_gap)(int)) {
   // 12KB, not the old 6KB: handle_fput keeps a 4KB chunk buffer on this
   // task's stack and LittleFS writes underneath it need headroom too.
   xTaskCreate(rx_task, "devctl_rx", 12288, nullptr, 3, nullptr);
-  ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe, @time, @gap, "
+  ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe, @time, @gap, @stat, "
                 "@fput, @fget, @fls, @fdel, @reboot, @adc, @gpin, @gpinhist)");
 }
 

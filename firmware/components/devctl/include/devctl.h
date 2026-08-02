@@ -3,6 +3,7 @@
 // by a leading '@'. Host side and full wire format: tools/devctl.py.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace devctl {
@@ -20,6 +21,14 @@ namespace devctl {
 // `on_gap`, if given, runs when the host sends @gap <y>: it applies a new
 // panel y-offset live, for aligning the write window to the glass without
 // reflashing (the "put calibration on the device" lesson).
+// `on_stat`, if given, runs when the host sends @stat: it fills `buf` (of
+// `cap` bytes) with a NUL-terminated JSON object describing device state
+// (firmware version, battery, clock, reviews today, per-deck counts) that
+// devctl then wraps as "@ok stat <json>". Like `on_time_set`/`on_gap`, this
+// runs directly on the devctl RX task rather than under the LVGL lock, so it
+// must stick to state main.cpp already reads outside the lock (see
+// on_home_refresh's per-deck counts loop, which this mirrors) and never
+// touch an LVGL widget.
 //
 // Also implements the file-transfer half of the protocol (@fput, @fget,
 // @fls, @fdel, @reboot), documented in full in docs/sync-protocol.md, plus
@@ -30,6 +39,7 @@ namespace devctl {
 // charge-detect line), and @gpinhist (start/stop/dump a background sampler
 // over the same pins, for diffing levels across a USB unplug/replug window).
 void init(void (*on_cal)() = nullptr, void (*on_time_set)(int64_t epoch_seconds) = nullptr,
-          void (*on_gap)(int y_gap) = nullptr);
+          void (*on_gap)(int y_gap) = nullptr,
+          void (*on_stat)(char* buf, size_t cap) = nullptr);
 
 }  // namespace devctl

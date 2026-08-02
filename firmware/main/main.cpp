@@ -12,6 +12,7 @@
 // likewise recovered from the same filesystem; see restore_clock_if_unset().
 
 #include <cinttypes>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -24,6 +25,7 @@
 #include <driver/i2c_master.h>
 #include <driver/ledc.h>
 #include <driver/spi_master.h>
+#include <esp_app_desc.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
 #include <esp_lcd_panel_io.h>
@@ -707,6 +709,33 @@ void on_back() {
   go_home();
 }
 
+// Queue counts (and card total) for g_slots[i] at `now`: the live session's
+// counts if that slot is the one currently open, otherwise a throwaway
+// Deck+Session over its bytes, replayed from the global log exactly as
+// deck_registry.h describes. Shared by on_home_refresh (the picker) and
+// on_stat_query (@stat) so the two never drift.
+session::Counts deck_counts(size_t i, int64_t now, int* cards) {
+  *cards = 0;
+  session::Counts c;
+  if (static_cast<int>(i) == g_open_slot && g_session != nullptr) {
+    *cards = static_cast<int>(g_deck.count());
+    return g_session->counts(now, kUtcOffsetSeconds);  // live: reflects grades made this boot
+  }
+  deck::Deck d;
+  if (g_slots[i].embedded) {
+    // Same embedded bytes open_deck() would use; loaded here as a
+    // throwaway Deck purely to compute counts (see deck_registry.h).
+    const size_t deck_size = static_cast<size_t>(kDeckEnd - kDeckStart);
+    if (d.open(kDeckStart, deck_size, /*verify_crc=*/false) != deck::Error::None) return c;
+  } else {
+    std::vector<uint8_t> bytes;
+    if (!deck::read_file(g_slots[i].path.c_str(), &bytes)) return c;
+    if (d.open(bytes.data(), bytes.size(), /*verify_crc=*/false) != deck::Error::None) return c;
+  }
+  *cards = static_cast<int>(d.count());
+  return deck::counts_for(d, g_params, g_limits, g_log_entries, now, kUtcOffsetSeconds);
+}
+
 // Recomputes every deck's queue counts and the status bar, then pushes them
 // to home_ui. Called once at boot and then ~once a minute by home_ui's own
 // internal timer (see home_ui.h's set_refresh_callback() doc comment) plus
@@ -730,31 +759,83 @@ void on_home_refresh() {
   static home::DeckRow rows[16];
   int n = 0;
   for (size_t i = 0; i < g_slots.size() && n < 16; ++i, ++n) {
-    session::Counts c;
-    if (static_cast<int>(i) == g_open_slot && g_session != nullptr) {
-      c = g_session->counts(now, kUtcOffsetSeconds);  // live: reflects grades made this boot
-    } else if (g_slots[i].embedded) {
-      // Same embedded bytes open_deck() would use; loaded here as a
-      // throwaway Deck purely to compute counts (see deck_registry.h).
-      deck::Deck d;
-      const size_t deck_size = static_cast<size_t>(kDeckEnd - kDeckStart);
-      if (d.open(kDeckStart, deck_size, /*verify_crc=*/false) == deck::Error::None) {
-        c = deck::counts_for(d, g_params, g_limits, g_log_entries, now, kUtcOffsetSeconds);
-      }
-    } else {
-      std::vector<uint8_t> bytes;
-      deck::Deck d;
-      if (deck::read_file(g_slots[i].path.c_str(), &bytes) &&
-          d.open(bytes.data(), bytes.size(), /*verify_crc=*/false) == deck::Error::None) {
-        c = deck::counts_for(d, g_params, g_limits, g_log_entries, now, kUtcOffsetSeconds);
-      }
-    }
+    int cards = 0;
+    const session::Counts c = deck_counts(i, now, &cards);
     rows[n].name = g_slots[i].name.c_str();
     rows[n].fresh = c.fresh;
     rows[n].learning = c.learning;
     rows[n].due = c.due;
   }
   home::set_decks(rows, n);
+}
+
+// ---------------------------------------------------------------------------
+// @stat -- device-state snapshot for the sync host (see devctl.h's on_stat
+// doc comment). Built with the same bounded-append style devctl.cpp's own
+// @fls/@gpin handlers use: track a length, snprintf into buf+len each time.
+
+// Appends formatted text to buf (cap bytes total), bumping *len. Silently
+// stops growing past cap, same truncation contract as devctl.cpp's own
+// bounded-buffer helpers (@fls, @gpin).
+void json_appendf(char* buf, size_t cap, size_t* len, const char* fmt, ...) {
+  if (*len >= cap) return;
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = std::vsnprintf(buf + *len, cap - *len, fmt, ap);
+  va_end(ap);
+  if (n > 0) *len += static_cast<size_t>(n);
+}
+
+// Appends `s` with '"' and '\\' JSON-escaped (deck names/slugs are
+// host-supplied text from deck::parse_meta, not guaranteed quote-free).
+void json_append_escaped(char* buf, size_t cap, size_t* len, const char* s) {
+  for (const char* p = s; *p; ++p) {
+    if (*len + 2 >= cap) return;
+    if (*p == '"' || *p == '\\') buf[(*len)++] = '\\';
+    buf[(*len)++] = *p;
+  }
+}
+
+// Registered with devctl::init as on_stat; runs on the devctl RX task, not
+// under the LVGL lock (see devctl.h), so it sticks to the same state
+// on_home_refresh reads without ever touching an LVGL widget.
+void on_stat_query(char* buf, size_t cap) {
+  size_t len = 0;
+  json_appendf(buf, cap, &len, "{");
+
+  const esp_app_desc_t* desc = esp_app_get_description();
+  if (desc != nullptr && desc->version[0] != '\0') {
+    json_appendf(buf, cap, &len, "\"fw\":\"");
+    json_append_escaped(buf, cap, &len, desc->version);
+    json_appendf(buf, cap, &len, "\",");
+  }
+
+  json_appendf(buf, cap, &len, "\"battery\":{\"pct\":%d,\"charging\":%s},",
+               power::battery_percent(), power::charging() ? "true" : "false");
+
+  const int64_t now = now_seconds();
+  struct std::tm local {};
+  const std::time_t t = static_cast<std::time_t>(now + kUtcOffsetSeconds);
+  gmtime_r(&t, &local);  // already shifted by kUtcOffsetSeconds, so read as if UTC
+  const int64_t time_field = (local.tm_year + 1900 >= 2000) ? now : 0;
+
+  json_appendf(buf, cap, &len, "\"time\":%" PRId64 ",\"reviews_today\":%d,\"decks\":[",
+               time_field, g_reviewed_today);
+
+  for (size_t i = 0; i < g_slots.size(); ++i) {
+    int cards = 0;
+    const session::Counts c = deck_counts(i, now, &cards);
+    if (i > 0) json_appendf(buf, cap, &len, ",");
+    json_appendf(buf, cap, &len, "{\"slug\":\"");
+    json_append_escaped(buf, cap, &len, g_slots[i].slug.c_str());
+    json_appendf(buf, cap, &len, "\",\"name\":\"");
+    json_append_escaped(buf, cap, &len, g_slots[i].name.c_str());
+    json_appendf(buf, cap, &len, "\",\"lang\":\"");
+    json_append_escaped(buf, cap, &len, g_slots[i].lang.c_str());
+    json_appendf(buf, cap, &len, "\",\"cards\":%d,\"learning\":%d,\"due\":%d,\"fresh\":%d}",
+                 cards, c.learning, c.due, c.fresh);
+  }
+  json_appendf(buf, cap, &len, "]}");
 }
 
 void go_home() {
@@ -1037,7 +1118,7 @@ extern "C" void app_main() {
   // see font_prewarm_task.
   xTaskCreate(font_prewarm_task, "fonts", 4096, nullptr, 2, nullptr);
 
-  devctl::init(start_calibration, on_time_synced, on_gap_adjust);
+  devctl::init(start_calibration, on_time_synced, on_gap_adjust, on_stat_query);
 
   xTaskCreate(button_task, "buttons", 4096, nullptr, 3, nullptr);
 

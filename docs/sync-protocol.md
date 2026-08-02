@@ -44,6 +44,7 @@ is best-effort and never blocks the requested operation on failure.
 @fls                              list files
 @fdel <path>                      delete (decks/ and fonts/ only)
 @reboot                           apply pushed content by restarting
+@stat                             device state snapshot (no file transfer)
 ```
 
 ### `@fput`
@@ -87,6 +88,38 @@ listing would overflow, it is truncated at a whole entry and ends with
 
 Replies `@ok rebooting`, waits ~200 ms for the reply to flush, then
 `esp_restart()`.
+
+### `@stat`
+
+Replies on one line: `@ok stat <json>`, where `<json>` is a compact JSON
+object describing device state, so the host can check in without pulling
+any files:
+
+```json
+{"fw":"2b9aa22-dirty","battery":{"pct":87,"charging":true},"time":1754111000,
+ "reviews_today":34,"decks":[{"slug":"hsk1","name":"HSK 1","lang":"zh",
+ "cards":500,"learning":3,"due":12,"fresh":5}]}
+```
+
+- `fw`: the running app's `esp_app_get_description()->version` (git describe
+  when built in a git checkout, e.g. `2b9aa22-dirty`). Omitted entirely if
+  the firmware has no version string.
+- `battery.pct` / `battery.charging`: same readings as the home screen's
+  status bar (`power::battery_percent()` / `power::charging()`); `pct` is
+  `-1` if no ADC reading has landed yet.
+- `time`: `time(nullptr)`, or `0` if the device's clock is still unset (see
+  `@time` above; a year before 2000 is treated as unset).
+- `reviews_today`: cards graded today across all decks, the same count
+  `persist::reviewed_today()` seeds at boot and main.cpp increments live.
+- `decks`: one entry per slot the picker shows (embedded fallback deck
+  included), each with the same `learning`/`due`/`fresh` queue counts
+  `deck::counts_for` computes for the home screen. Deck names/slugs are
+  JSON-escaped (`"` and `\` only; the wire charset for `lang`/`slug` never
+  needs it, but `name` is free text from the deck's META).
+
+Reply buffer is 2KB; a very large deck list is truncated by `snprintf`
+(the JSON stays syntactically valid up to the truncation point, but may end
+mid-array) rather than by an explicit `...` marker like `@fls` uses.
 
 ## Host-side commands
 
