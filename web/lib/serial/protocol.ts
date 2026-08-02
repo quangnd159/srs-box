@@ -112,19 +112,65 @@ function crcHex(data: Uint8Array): string {
 
 const CHUNK_SIZE = 4096;
 
+/**
+ * Default time to wait for a device reply before giving up. Every
+ * `@`-prefixed round trip goes through {@link DeviceClient.readControlLine}
+ * or the chunked reads in fget/fput, both guarded by {@link withTimeout}, so
+ * a lost or never-sent reply degrades into a rejected promise instead of an
+ * unresolved one. Without this, a single stalled reply (e.g. the device
+ * wedged mid `@fls`/`@fget`) hangs the caller forever with nothing to catch
+ * and nothing to log — the bug this constant exists to prevent.
+ */
+const DEFAULT_TIMEOUT_MS = 10_000;
+
+export interface DeviceClientOptions {
+  /** Overridable for tests that want to hit the timeout quickly. */
+  timeoutMs?: number;
+}
+
 export class DeviceClient {
   private readonly reader: LineReader;
+  private readonly timeoutMs: number;
 
-  constructor(private readonly transport: SerialTransport) {
+  constructor(
+    private readonly transport: SerialTransport,
+    opts: DeviceClientOptions = {},
+  ) {
     this.reader = new LineReader(transport);
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  }
+
+  /** Races `promise` against `this.timeoutMs`, rejecting with a DeviceError on expiry. */
+  private async withTimeout<T>(context: string, promise: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new DeviceError(`${context}: no reply after ${this.timeoutMs}ms`));
+      }, this.timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Reads lines until one starts with "@", discarding interleaved ESP_LOG output. */
-  private async readControlLine(): Promise<string> {
-    for (;;) {
-      const line = await this.reader.readLine();
-      if (line.startsWith("@")) return line;
-    }
+  private async readControlLine(context = "reply"): Promise<string> {
+    return this.withTimeout(
+      context,
+      (async () => {
+        for (;;) {
+          const line = await this.reader.readLine();
+          if (line.startsWith("@")) return line;
+        }
+      })(),
+    );
+  }
+
+  /** Reads exactly `n` bytes, timing out per chunk rather than for the whole transfer. */
+  private async readExactWithTimeout(n: number, context: string): Promise<Uint8Array> {
+    return this.withTimeout(context, this.reader.readExact(n));
   }
 
   private async writeLine(line: string): Promise<void> {
@@ -140,14 +186,14 @@ export class DeviceClient {
 
   async ping(): Promise<void> {
     await this.writeLine("@ping");
-    const line = await this.readControlLine();
+    const line = await this.readControlLine("@ping");
     this.assertOk(line, "@ping");
   }
 
   /** Hands the device the host's clock; see CLAUDE.md, there's no RTC on this board. */
   async syncTime(unixSeconds: number): Promise<void> {
     await this.writeLine(`@time ${Math.floor(unixSeconds)}`);
-    const line = await this.readControlLine();
+    const line = await this.readControlLine("@time");
     this.assertOk(line, "@time");
   }
 
@@ -158,7 +204,7 @@ export class DeviceClient {
    */
   async stat(): Promise<DeviceStat> {
     await this.writeLine("@stat");
-    const line = await this.readControlLine();
+    const line = await this.readControlLine("@stat");
     if (!line.startsWith("@ok stat ")) {
       this.assertOk(line, "@stat");
       throw new DeviceError(`@stat: unexpected reply ${JSON.stringify(line)}`);
@@ -173,7 +219,7 @@ export class DeviceClient {
   async fput(path: string, data: Uint8Array, onProgress?: ProgressCallback): Promise<void> {
     await this.writeLine(`@fput ${path} ${data.length} ${crcHex(data)}`);
 
-    const ready = await this.readControlLine();
+    const ready = await this.readControlLine("@fput");
     if (ready !== "@ok send") {
       this.assertOk(ready, "@fput");
       throw new DeviceError(`@fput: expected "@ok send", got ${JSON.stringify(ready)}`);
@@ -187,7 +233,7 @@ export class DeviceClient {
       onProgress?.(sent, data.length);
     }
 
-    const done = await this.readControlLine();
+    const done = await this.readControlLine("@fput");
     this.assertOk(done, "@fput");
   }
 
@@ -195,7 +241,7 @@ export class DeviceClient {
   async fget(path: string, onProgress?: ProgressCallback): Promise<Uint8Array> {
     await this.writeLine(`@fget ${path}`);
 
-    const header = await this.readControlLine();
+    const header = await this.readControlLine("@fget");
     if (!header.startsWith("@fget ")) {
       this.assertOk(header, "@fget");
       throw new DeviceError(`@fget: expected a file header, got ${JSON.stringify(header)}`);
@@ -211,7 +257,7 @@ export class DeviceClient {
     let received = 0;
     while (received < nbytes) {
       const want = Math.min(CHUNK_SIZE, nbytes - received);
-      const chunk = await this.reader.readExact(want);
+      const chunk = await this.readExactWithTimeout(want, "@fget");
       chunks.push(chunk.slice());
       received += chunk.length;
       onProgress?.(received, nbytes);
@@ -233,7 +279,7 @@ export class DeviceClient {
 
   async fls(): Promise<FlsResult> {
     await this.writeLine("@fls");
-    const line = await this.readControlLine();
+    const line = await this.readControlLine("@fls");
     if (!line.startsWith("@ok fls")) {
       this.assertOk(line, "@fls");
       throw new DeviceError(`@fls: unexpected reply ${JSON.stringify(line)}`);
@@ -258,13 +304,13 @@ export class DeviceClient {
 
   async fdel(path: string): Promise<void> {
     await this.writeLine(`@fdel ${path}`);
-    const line = await this.readControlLine();
+    const line = await this.readControlLine("@fdel");
     this.assertOk(line, "@fdel");
   }
 
   async reboot(): Promise<void> {
     await this.writeLine("@reboot");
-    const line = await this.readControlLine();
+    const line = await this.readControlLine("@reboot");
     this.assertOk(line, "@reboot");
   }
 }
