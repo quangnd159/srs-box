@@ -92,6 +92,31 @@
 #define LCD_SWAP_XY          false
 
 // ---------------------------------------------------------------------------
+// Battery ADC: confirmed 2026-08-02
+// ---------------------------------------------------------------------------
+// ADC2_CHANNEL_6, 12dB attenuation. Confirmed by stock-firmware strings
+// showing its PowerManager polling ADC_CHANNEL_6, by ruling out ADC1's copy
+// of that channel index (GPIO7, already the ES7210 mic data line), and by a
+// live @adc read giving a stable battery-shaped raw ~2449 with USB plugged.
+// See docs/pinout.md. Not consumed from here: no component besides main.cpp
+// includes this header, so firmware/components/power/power.cpp defines the
+// same pin/unit/channel locally, pointing back at docs/pinout.md.
+#define PIN_BATTERY_ADC      GPIO_NUM_17
+#define BATTERY_ADC_UNIT     ADC_UNIT_2
+#define BATTERY_ADC_CHANNEL  ADC_CHANNEL_6
+
+// Charge status: confirmed 2026-08-02 by an @gpinhist unplug/replug diff --
+// active-high while the charger IC is actively topping off the battery. Read
+// 1 for ~3s while plugged and topping off, dropped to 0 at the unplug
+// instant, and stayed 0 after replug (battery was already above the
+// recharge threshold, so charging didn't resume) and on a fresh plugged/full
+// @gpin -- ruling out plain VBUS-present. Not yet distinguished from a
+// separate "charge complete" pin; that would need a drained-battery
+// observation. See docs/pinout.md. Same caveat as PIN_BATTERY_ADC above:
+// power.cpp defines this pin locally rather than including this header.
+#define PIN_CHARGE_STATUS    GPIO_NUM_47
+
+// ---------------------------------------------------------------------------
 // I2C: CST816 touch controller, ES8311 and ES7210 audio codecs
 // ---------------------------------------------------------------------------
 #define PIN_I2C_SCL          GPIO_NUM_11

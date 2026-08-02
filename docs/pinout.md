@@ -37,7 +37,7 @@ Observed during boot of the stock firmware:
 | Audio out | ES8311 | Slave mode. |
 | Audio in | ES7210 | Slave mode, 4 mics (`MIC1`–`MIC4`), TDM, 16-bit. |
 | Audio bus | I2S | RX is TDM 4-slot; TX is standard stereo/mono. Runs at 24kHz in stock firmware. |
-| Battery | ADC | Raw counts around 2300 map to ~68%; charge state is detected separately. |
+| Battery | ADC | GPIO17, ADC2_CHANNEL_6, confirmed 2026-08-02 (see Pin map below). Charge status: GPIO47, active-high while actively charging, also confirmed 2026-08-02 (see Pin map below). |
 | Buttons | at least 6 (stock firmware); 3 physical (power, plus, minus) on this board | `InitializeButtons()` registers six handlers in the stock firmware. The three physical buttons, confirmed on-device 2026-07-29 (see Pin map below): GPIO39 = minus, GPIO40 = plus, GPIO2 = power (short-press only — see below). |
 
 Display resolution: confirmed 240 x 284 visible (240 x 320 panel memory, 36-row gap). See "Display configuration" below.
@@ -80,6 +80,8 @@ Worth copying the shape of this: dual OTA slots plus a large asset area. Our lay
 | Button: power (short press only) | **2** | plain GPIO, confirmed 2026-07-29 by an on-device GPIO scan with the user pressing the button |
 | Button: plus / Good | **40** | plain GPIO, confirmed 2026-07-29 by an on-device GPIO scan with the user pressing the button |
 | Button: minus / Again | **39** | plain GPIO, confirmed 2026-07-29 by an on-device GPIO scan with the user pressing the button |
+| Battery ADC | **17** (ADC2_CHANNEL_6) | Confirmed 2026-08-02: stock-firmware strings show its `PowerManager` polling `ADC_CHANNEL_6`; ADC1's copy of that channel index is GPIO7, already ruled out as the ES7210 mic data line, which points at the ADC2 instance instead; a live `@adc` read then gave a stable, battery-shaped raw ~2448-2450 at 12dB attenuation with USB plugged. 12dB attenuation. Once `power.cpp` has run (any `power::battery_percent()` call), it holds the ADC2 unit open for the process lifetime, so `@adc`'s own GPIO17 reading will report -1 afterwards -- expected, not a fault; its GPIO1/GPIO3 readings are unaffected. |
+| Charge status | **47** | Confirmed 2026-08-02 with `devctl`'s `@gpinhist`: started sampling, unplugged USB for ~15s, replugged. GPIO47 read 1 for the first ~3s (plugged, battery full, charger topping off), dropped to 0 at the unplug instant, and stayed 0 after replug -- because the battery was already above the charger IC's recharge threshold, so charging never resumed. A fresh `@gpin` while plugged and full still reads 47=0, ruling out "plain VBUS present" as the interpretation. Reads clean with no pulls enabled. Active-high = actively charging. **Caveat:** every observation so far started from a full battery; this hasn't been distinguished from a separate "charge complete" status pin on the charger IC. If charging a drained battery ever shows different behaviour on this pin, revisit. |
 
 **The display is on SPI3, not SPI2/FSPI**, and uses a single data line — ordinary 4-wire SPI, not QSPI. Anything written against an FSPI example will need adjusting.
 
@@ -179,7 +181,8 @@ without ever touching the power button. See `firmware/main/main.cpp`.
 Inputs do not appear in the output routing, so these remain open:
 
 - Touch reset line for the CST816 (touch INT is now known — see "Touch" below: it is unwired).
-- The battery ADC channel.
+
+The battery ADC channel and charge status are no longer unknown — see the Pin map above (GPIO17/ADC2_CHANNEL_6 and GPIO47, both confirmed 2026-08-02). Charge status still carries one open caveat (distinguishing "charging" from "charge complete"), noted in its Pin map row.
 
 ## Touch (confirmed 2026-07-29)
 

@@ -26,8 +26,12 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <driver/gpio.h>
 #include <driver/usb_serial_jtag.h>
 #include <driver/usb_serial_jtag_vfs.h>
+#include <esp_adc/adc_cali.h>
+#include <esp_adc/adc_cali_scheme.h>
+#include <esp_adc/adc_oneshot.h>
 #include <esp_err.h>
 #include <esp_littlefs.h>
 #include <esp_log.h>
@@ -582,6 +586,287 @@ void handle_shot() {
 }
 
 // ---------------------------------------------------------------------------
+// @adc / @gpin / @gpinhist -- battery ADC channel and charge-detect GPIO,
+// both now confirmed (see docs/pinout.md), plus the general free-GPIO sweep
+// @gpin still supports for anything else that turns up unexplained.
+//
+// The vendor never documented either circuit; these started as pure
+// diagnostics -- point a multimeter/known battery state at the board, run
+// @adc and @gpin a few times, and look for the reading that tracks it;
+// @gpinhist extended @gpin across an unplug/replug window so the diff could
+// be read back after the fact instead of watched live, which is how GPIO47
+// (charge status) got confirmed. Nothing here is wired into review/session
+// logic; all three commands remain self-contained and safe to call
+// repeatedly for any future hunting.
+//
+// Once firmware/components/power/power.cpp has run (i.e. after the first
+// power::battery_percent() call), @adc's GPIO17/ADC2 read will report -1:
+// power.cpp holds the ADC_UNIT_2 handle open for the life of the process
+// (see its "Lazy one-time init" comment), and a second adc_oneshot_new_unit()
+// on the same unit while one is already held fails outright. That is
+// expected once the real driver has claimed the unit, not a hardware fault
+// -- @adc's GPIO1/GPIO3 readings on ADC1 are unaffected either way.
+
+// GPIO1 (ADC1_CH0) and GPIO3 (ADC1_CH2) are the only two ADC1-capable pins
+// this board leaves free -- every other ADC1 pin (GPIO2, GPIO4-10) is
+// already claimed by a button or the display/I2C/I2S wiring (see
+// board_config.h and docs/pinout.md's pin map). GPIO17 (ADC2_CH6) is sampled
+// too: the stock firmware's PowerManager reads ADC_CHANNEL_6, and since
+// ADC1's copy of that channel index (GPIO7) is already the ES7210 mic data
+// line, the ADC2 instance is the live candidate. 12dB attenuation is used so
+// the full 0-3.3V range is visible; a real battery reading behind a divider
+// is expected around raw ~2300 at this attenuation, per docs/pinout.md.
+void handle_adc() {
+  adc_oneshot_unit_handle_t unit = nullptr;
+  adc_oneshot_unit_init_cfg_t unit_cfg = {};
+  unit_cfg.unit_id = ADC_UNIT_1;
+  if (adc_oneshot_new_unit(&unit_cfg, &unit) != ESP_OK) {
+    reply_err("adc_oneshot_new_unit failed");
+    return;
+  }
+
+  const adc_channel_t channels[2] = {ADC_CHANNEL_0, ADC_CHANNEL_2};  // GPIO1, GPIO3
+  adc_oneshot_chan_cfg_t chan_cfg = {};
+  chan_cfg.atten = ADC_ATTEN_DB_12;
+  chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+  bool chan_ok[2];
+  for (int i = 0; i < 2; ++i) {
+    chan_ok[i] = adc_oneshot_config_channel(unit, channels[i], &chan_cfg) == ESP_OK;
+    if (!chan_ok[i]) {
+      ESP_LOGW(TAG, "adc_oneshot_config_channel(%d) failed", static_cast<int>(channels[i]));
+    }
+  }
+
+  // Calibration is best-effort: a raw-only reading already answers "does this
+  // pin track the battery or just drift like a floating pin", which is the
+  // whole point of this command. Fall back to raw-only if the eFuse bits this
+  // scheme needs were never burnt.
+  adc_cali_handle_t cali = nullptr;
+  bool have_cali = false;
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+  adc_cali_curve_fitting_config_t cali_cfg = {};
+  cali_cfg.unit_id = ADC_UNIT_1;
+  cali_cfg.atten = ADC_ATTEN_DB_12;
+  cali_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+  have_cali = adc_cali_create_scheme_curve_fitting(&cali_cfg, &cali) == ESP_OK;
+#endif
+
+  constexpr int kSamples = 32;
+  int64_t sums[2] = {0, 0};
+  for (int s = 0; s < kSamples; ++s) {
+    for (int i = 0; i < 2; ++i) {
+      if (!chan_ok[i]) continue;
+      int raw = 0;
+      if (adc_oneshot_read(unit, channels[i], &raw) == ESP_OK) sums[i] += raw;
+    }
+  }
+  const int avg1 = chan_ok[0] ? static_cast<int>(sums[0] / kSamples) : -1;
+  const int avg3 = chan_ok[1] ? static_cast<int>(sums[1] / kSamples) : -1;
+
+  int mv1 = -1, mv3 = -1;
+  if (have_cali) {
+    if (chan_ok[0]) adc_cali_raw_to_voltage(cali, avg1, &mv1);
+    if (chan_ok[1]) adc_cali_raw_to_voltage(cali, avg3, &mv3);
+    adc_cali_delete_scheme_curve_fitting(cali);
+  }
+
+  // Deinit so the unit is free again for the next @adc call -- a second
+  // adc_oneshot_new_unit() on the same unit while one is still held fails.
+  adc_oneshot_del_unit(unit);
+
+  // GPIO17 / ADC2_CHANNEL_6: strings pulled from the stock firmware dump show
+  // its PowerManager reading ADC_CHANNEL_6 for the battery, and ADC1_CH6
+  // (GPIO7) is already claimed by the ES7210 mic data line, which points at
+  // the ADC2 instance of that same channel index instead. ADC2 needs its own
+  // unit handle and shares its hardware with the WiFi driver, so a read can
+  // legitimately fail with ESP_ERR_TIMEOUT while WiFi is active -- treated as
+  // a dropped sample, not a reason to fail the whole command.
+  int avg17 = -1;
+  adc_oneshot_unit_handle_t unit2 = nullptr;
+  adc_oneshot_unit_init_cfg_t unit2_cfg = {};
+  unit2_cfg.unit_id = ADC_UNIT_2;
+  if (adc_oneshot_new_unit(&unit2_cfg, &unit2) == ESP_OK) {
+    adc_oneshot_chan_cfg_t chan17_cfg = {};
+    chan17_cfg.atten = ADC_ATTEN_DB_12;
+    chan17_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(unit2, ADC_CHANNEL_6, &chan17_cfg) == ESP_OK) {
+      int64_t sum17 = 0;
+      int n17 = 0;
+      for (int s = 0; s < kSamples; ++s) {
+        int raw = 0;
+        if (adc_oneshot_read(unit2, ADC_CHANNEL_6, &raw) == ESP_OK) {
+          sum17 += raw;
+          ++n17;
+        }
+      }
+      if (n17 > 0) avg17 = static_cast<int>(sum17 / n17);
+    } else {
+      ESP_LOGW(TAG, "adc_oneshot_config_channel(ADC2_CH6/GPIO17) failed");
+    }
+    adc_oneshot_del_unit(unit2);
+  } else {
+    ESP_LOGW(TAG, "adc_oneshot_new_unit(ADC_UNIT_2) failed");
+  }
+
+  if (have_cali) {
+    reply_okf("adc gpio1=%d gpio1_mv=%d gpio3=%d gpio3_mv=%d gpio17=%d", avg1, mv1, avg3, mv3,
+              avg17);
+  } else {
+    reply_okf("adc gpio1=%d gpio3=%d gpio17=%d", avg1, avg3, avg17);
+  }
+}
+
+// Digital snapshot of every free, input-capable GPIO, for charge-detect
+// hunting. Pins already claimed by board_config.h (the display, I2C, I2S,
+// power-enable, and the three physical buttons) are excluded by construction
+// -- this list only touches GPIOs nothing else in the firmware configures.
+//
+// GPIO45/46 are strapping pins (VDD_SPI voltage select / boot mode): read as
+// plain floating input with no pulls touched, so whatever the board latched
+// at reset is left undisturbed. GPIO46 is input-only on the S3 anyway, so
+// this is the only mode it supports.
+// GPIO41/42 double as the native USB-JTAG MTDI/MTMS lines. Reading them as
+// GPIO is harmless with no debugger attached -- this command rides the CDC
+// side of the same USB port -- but avoid calling @gpin while openocd is
+// attached, to not disturb an active JTAG session.
+// Shared with @gpinhist below, so both commands agree on which pins and in
+// which bit order.
+constexpr gpio_num_t kGpinPins[] = {
+    GPIO_NUM_1,  GPIO_NUM_3,  GPIO_NUM_17, GPIO_NUM_21, GPIO_NUM_38,
+    GPIO_NUM_41, GPIO_NUM_42, GPIO_NUM_45, GPIO_NUM_46, GPIO_NUM_47,
+    GPIO_NUM_48,
+};
+constexpr int kGpinPinCount = sizeof(kGpinPins) / sizeof(kGpinPins[0]);
+static_assert(kGpinPinCount <= 16, "gpinhist packs levels into a uint16_t bitmask");
+
+void configure_gpin_pins() {
+  gpio_config_t cfg = {};
+  cfg.mode = GPIO_MODE_INPUT;
+  cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+  cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+  cfg.pin_bit_mask = 0;
+  for (auto p : kGpinPins) cfg.pin_bit_mask |= 1ULL << p;
+  gpio_config(&cfg);
+}
+
+void handle_gpin() {
+  configure_gpin_pins();
+
+  char body[192];
+  int len = std::snprintf(body, sizeof(body), "gpin");
+  for (int i = 0; i < kGpinPinCount && len > 0 && static_cast<size_t>(len) < sizeof(body); ++i) {
+    len += std::snprintf(body + len, sizeof(body) - static_cast<size_t>(len), " %d=%d",
+                          static_cast<int>(kGpinPins[i]), gpio_get_level(kGpinPins[i]));
+  }
+  reply_okf("%s", body);
+}
+
+// ---------------------------------------------------------------------------
+// @gpinhist -- background sampler for the charge-detect diff experiment.
+//
+// The idea: `@gpinhist start`, then the user physically unplugs USB for
+// ~15s and replugs it, then `@gpinhist` dumps the ring so the host can diff
+// levels across the unplugged window and see which candidate pin (GPIO47 is
+// the current suspect, see docs/pinout.md) actually tracks plug state rather
+// than just reading high always. Same pin list and bit order as @gpin.
+//
+// Self-contained: an esp_timer periodic callback samples every 500ms into a
+// fixed RAM ring of the last ~120 samples (60s), each entry a tick offset
+// (ms since start) plus a packed level bitmask. No task, no dynamic memory.
+
+constexpr int kGpinHistCapacity = 120;  // 60s at 500ms
+constexpr int64_t kGpinHistPeriodUs = 500 * 1000;
+
+esp_timer_handle_t g_gpinhist_timer = nullptr;
+uint32_t g_gpinhist_tick_ms[kGpinHistCapacity];
+uint16_t g_gpinhist_levels[kGpinHistCapacity];
+int g_gpinhist_count = 0;   // number of valid entries (<= capacity)
+int g_gpinhist_next = 0;    // next slot to write; wraps, oldest-overwrite
+int64_t g_gpinhist_start_us = 0;
+
+void gpinhist_sample_cb(void*) {
+  uint16_t bits = 0;
+  for (int i = 0; i < kGpinPinCount; ++i) {
+    if (gpio_get_level(kGpinPins[i])) bits |= static_cast<uint16_t>(1u << i);
+  }
+  const uint32_t tick_ms =
+      static_cast<uint32_t>((esp_timer_get_time() - g_gpinhist_start_us) / 1000);
+
+  g_gpinhist_tick_ms[g_gpinhist_next] = tick_ms;
+  g_gpinhist_levels[g_gpinhist_next] = bits;
+  g_gpinhist_next = (g_gpinhist_next + 1) % kGpinHistCapacity;
+  if (g_gpinhist_count < kGpinHistCapacity) ++g_gpinhist_count;
+}
+
+void gpinhist_start() {
+  if (g_gpinhist_timer != nullptr) {
+    esp_timer_stop(g_gpinhist_timer);
+    esp_timer_delete(g_gpinhist_timer);
+    g_gpinhist_timer = nullptr;
+  }
+  configure_gpin_pins();
+  g_gpinhist_count = 0;
+  g_gpinhist_next = 0;
+  g_gpinhist_start_us = esp_timer_get_time();
+
+  esp_timer_create_args_t args = {};
+  args.callback = gpinhist_sample_cb;
+  args.name = "gpinhist";
+  if (esp_timer_create(&args, &g_gpinhist_timer) != ESP_OK) {
+    reply_err("esp_timer_create failed");
+    g_gpinhist_timer = nullptr;
+    return;
+  }
+  if (esp_timer_start_periodic(g_gpinhist_timer, kGpinHistPeriodUs) != ESP_OK) {
+    reply_err("esp_timer_start_periodic failed");
+    esp_timer_delete(g_gpinhist_timer);
+    g_gpinhist_timer = nullptr;
+    return;
+  }
+  reply_ok("gpinhist started");
+}
+
+void gpinhist_stop() {
+  if (g_gpinhist_timer != nullptr) {
+    esp_timer_stop(g_gpinhist_timer);
+    esp_timer_delete(g_gpinhist_timer);
+    g_gpinhist_timer = nullptr;
+  }
+  reply_ok("gpinhist stopped");
+}
+
+// Dumps the ring oldest-first as one line per sample ("@gpinhist <i> <tick_ms>
+// <bits_hex>"), then a terminating "@ok gpinhist <n>" the host can use to
+// know the dump is complete. Multi-line rather than one packed line: 120
+// samples would run well past the ~256-byte reply buffers used elsewhere.
+void gpinhist_dump() {
+  const int n = g_gpinhist_count;
+  // Oldest entry is at g_gpinhist_next when the ring is full; when it isn't
+  // full yet, the oldest entry is simply index 0 (nothing has wrapped).
+  const int oldest = (n == kGpinHistCapacity) ? g_gpinhist_next : 0;
+  for (int i = 0; i < n; ++i) {
+    const int idx = (oldest + i) % kGpinHistCapacity;
+    char line[48];
+    const int len = std::snprintf(line, sizeof(line), "@gpinhist %d %" PRIu32 " %04x\n", i,
+                                   g_gpinhist_tick_ms[idx], g_gpinhist_levels[idx]);
+    if (len > 0) write_all(line, static_cast<size_t>(len));
+  }
+  reply_okf("gpinhist %d", n);
+}
+
+void handle_gpinhist(const char* arg) {
+  if (std::strcmp(arg, "start") == 0) {
+    gpinhist_start();
+  } else if (std::strcmp(arg, "stop") == 0) {
+    gpinhist_stop();
+  } else if (arg[0] == '\0') {
+    gpinhist_dump();
+  } else {
+    reply_err("usage: @gpinhist [start|stop]");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Command dispatch
 
 void (*g_cal_cb)() = nullptr;
@@ -612,6 +897,20 @@ void handle_line(char* line) {
   }
   if (std::strcmp(line, "@reboot") == 0) {
     handle_reboot();
+    return;
+  }
+  if (std::strcmp(line, "@adc") == 0) {
+    handle_adc();
+    return;
+  }
+  if (std::strcmp(line, "@gpin") == 0) {
+    handle_gpin();
+    return;
+  }
+  if (std::strncmp(line, "@gpinhist", 9) == 0 &&
+      (line[9] == '\0' || line[9] == ' ')) {
+    const char* arg = line[9] == ' ' ? line + 10 : line + 9;
+    handle_gpinhist(arg);
     return;
   }
   {
@@ -743,7 +1042,7 @@ void init(void (*on_cal)(), void (*on_time_set)(int64_t), void (*on_gap)(int)) {
   // task's stack and LittleFS writes underneath it need headroom too.
   xTaskCreate(rx_task, "devctl_rx", 12288, nullptr, 3, nullptr);
   ESP_LOGI(TAG, "devctl ready (@ping, @shot, @tap, @swipe, @time, @gap, "
-                "@fput, @fget, @fls, @fdel, @reboot)");
+                "@fput, @fget, @fls, @fdel, @reboot, @adc, @gpin, @gpinhist)");
 }
 
 }  // namespace devctl

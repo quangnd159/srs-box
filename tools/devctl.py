@@ -15,6 +15,8 @@ same link, distinguished by a leading '@' so it never collides with log output.
                    @fls
                    @fdel <path>
                    @reboot
+                   @adc
+                   @gpin
 
   device -> host   @ok <text> | @err <text>
                    @shot <w> <h> <fmt> <nbytes>\n followed by nbytes raw pixels
@@ -29,7 +31,12 @@ binary payload the same way @shot does.
 There is no RTC on this board, so the device has no idea what time it is
 until the host tells it: `time` sends the host's own clock over as
 @time <epoch>, which the firmware feeds to settimeofday() and persists to
-flash immediately (see docs/deck-format.md and CLAUDE.md).
+flash immediately (see docs/deck-format.md and CLAUDE.md). Every sync-protocol
+command (fput/fget/fls/fdel/reboot) also re-anchors the clock automatically
+before doing its own work, so a device left unplugged for a while gets a
+fresh @time on the next `push`/`pull`/`ls`/`rm`/`sync`/`reboot`, not just an
+explicit `devctl.py time`. That auto-sync is best-effort: a failure only
+prints a warning, it never blocks the requested operation.
 
 Usage:
   devctl.py monitor
@@ -44,6 +51,8 @@ Usage:
   devctl.py fls
   devctl.py fdel DEVICE_PATH
   devctl.py reboot
+  devctl.py adc
+  devctl.py gpin
 """
 import argparse
 import sys
@@ -138,6 +147,22 @@ def _read_exact(ser: serial.Serial, n: int, timeout: float) -> bytes:
     return bytes(buf)
 
 
+def _sync_time(ser: serial.Serial) -> None:
+    """Hands the device the host's clock before a sync-protocol operation.
+
+    There is no RTC on this board (see CLAUDE.md), so every connection should
+    re-anchor its idea of the time. Best-effort: a failure here is logged as
+    a warning and must not block the operation the user actually asked for.
+    """
+    try:
+        ser.write(f"@time {int(time.time())}\n".encode())
+        line = _await_reply(ser, timeout=3)
+        if not line.startswith(b"@ok"):
+            print(f"warning: @time sync failed: {line.decode(errors='replace')}", file=sys.stderr)
+    except TimeoutError:
+        print("warning: @time sync timed out", file=sys.stderr)
+
+
 def cmd_shot(args) -> None:
     from PIL import Image
 
@@ -187,6 +212,7 @@ def cmd_fput(args) -> None:
 
     ser = open_port(args.port, timeout=0.1)
     ser.reset_input_buffer()
+    _sync_time(ser)
     ser.write(f"@fput {args.device_path} {len(data)} {crc:08x}\n".encode())
 
     line = _await_reply(ser, timeout=5)
@@ -211,6 +237,7 @@ def cmd_fput(args) -> None:
 def cmd_fget(args) -> None:
     ser = open_port(args.port, timeout=0.1)
     ser.reset_input_buffer()
+    _sync_time(ser)
     ser.write(f"@fget {args.device_path}\n".encode())
 
     end = time.time() + args.timeout
@@ -249,6 +276,7 @@ def cmd_fget(args) -> None:
 def cmd_fls(args) -> None:
     ser = open_port(args.port)
     ser.reset_input_buffer()
+    _sync_time(ser)
     ser.write(b"@fls\n")
     line = _await_reply(ser, timeout=5)
     if not line.startswith(b"@ok fls"):
@@ -266,16 +294,18 @@ def cmd_fls(args) -> None:
 
 
 def cmd_fdel(args) -> None:
-    _simple(args, f"@fdel {args.device_path}\n".encode())
+    _simple(args, f"@fdel {args.device_path}\n".encode(), sync_time=True)
 
 
 def cmd_reboot(args) -> None:
-    _simple(args, b"@reboot\n")
+    _simple(args, b"@reboot\n", sync_time=True)
 
 
-def _simple(args, payload: bytes) -> None:
+def _simple(args, payload: bytes, sync_time: bool = False) -> None:
     ser = open_port(args.port)
     ser.reset_input_buffer()
+    if sync_time:
+        _sync_time(ser)
     ser.write(payload)
     end = time.time() + 3
     while time.time() < end:
@@ -356,6 +386,14 @@ def main() -> None:
 
     rb = sub.add_parser("reboot", help="apply pushed content by restarting (@reboot)")
     rb.set_defaults(func=cmd_reboot)
+
+    # Battery ADC / charge-detect hunting: see docs/pinout.md's "Still
+    # unknown" section. Both are one-shot hardware surveys, safe to re-run.
+    ad = sub.add_parser("adc", help="one-shot ADC survey of the battery-sense candidates (@adc)")
+    ad.set_defaults(func=lambda a: _simple(a, b"@adc\n"))
+
+    gp = sub.add_parser("gpin", help="digital snapshot of free GPIOs, for charge-detect (@gpin)")
+    gp.set_defaults(func=lambda a: _simple(a, b"@gpin\n"))
 
     args = ap.parse_args()
     args.func(args)
