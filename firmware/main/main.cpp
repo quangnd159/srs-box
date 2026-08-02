@@ -50,6 +50,7 @@ LV_FONT_DECLARE(font_cjk_28);  // compiled-in; for the boot splash only
 #include "persist.h"
 #include "power.h"
 #include "review_ui.h"
+#include "rtfont.h"
 #include "session.h"
 
 // The deck compiled by tools/deckc.py, linked into the binary.
@@ -761,57 +762,55 @@ void go_home() {
   lv_screen_load(home::screen());
 }
 
+// The four runtime deck fonts, in the order load_deck_fonts() fills them.
+lv_font_t* g_rt_fonts[4] = {nullptr, nullptr, nullptr, nullptr};
+
 // Loads one runtime CJK font if it's been pushed to flash, else leaves the
 // compiled-in subset in place (see review_ui.h's set_fonts() doc comment).
-// LVGL's binfont loader (lv_binfont_create(), see lvgl.h) works through the
-// LV_USE_FS_POSIX driver mounted on drive letter 'A' (see sdkconfig.defaults
-// and CLAUDE.md's "put calibration on the device" spirit applied to
-// fonts: this is loaded once at boot rather than hot-reloaded, since a font
-// push always ends in a @reboot anyway).
-const lv_font_t* try_load_font(int size) {
+// rtfont_create() reads only the head/cmap/loca/kern tables here — a few KB —
+// and faults the glyph bitmaps in later, so this costs milliseconds even for
+// a multi-MB font and can run before the UI is built. Loading happens once at
+// boot rather than being hot-reloaded, since a font push always ends in a
+// @reboot anyway.
+lv_font_t* try_load_font(int size) {
   char path[48];
-  std::snprintf(path, sizeof(path), "A:%s/font_cjk_%d.bin", kFontsDir, size);
-  lv_font_t* f = lv_binfont_create(path);
+  std::snprintf(path, sizeof(path), "%s/font_cjk_%d.bin", kFontsDir, size);
+  lv_font_t* f = rtfont_create(path);
   if (!f) {
     ESP_LOGI(TAG, "no runtime font at %s; using the compiled-in font_cjk_%d", path, size);
     return nullptr;
   }
-  ESP_LOGI(TAG, "loaded runtime font %s", path);
+  ESP_LOGI(TAG, "opened runtime font %s", path);
   return f;
 }
 
-// Loads the multi-MB deck fonts off LittleFS in the background, then swaps
-// them into the live UI. Boot shows the picker immediately with the
-// compiled-in fonts (which cost nothing to "load" — they're memory-mapped
-// out of the app image); this task closes the glyph-coverage gap ~10s
-// later. A card opened from a new deck before then renders its unknown
-// hanzi as blanks and heals on the spot when the swap lands.
-//
-// The slow part — lv_binfont_create's file read and allocation — runs
-// WITHOUT the LVGL lock, which is safe here because it only touches lv_fs
-// and lv_malloc (routed through the thread-safe C heap by
-// CONFIG_LV_USE_CLIB_MALLOC, see sdkconfig.defaults) and no display state.
-// Only the swap itself takes the lock.
-void font_load_task(void*) {
-  if (!g_fs_ok) {
-    vTaskDelete(nullptr);
-    return;
-  }
+// Must run before ui::init()/home::init() so the picker and the first card
+// are drawn with the deck fonts from the start — there is no deferred swap
+// any more.
+void load_deck_fonts() {
+  if (!g_fs_ok) return;
   const int64_t t0 = esp_timer_get_time();
-  const lv_font_t* f48 = try_load_font(48);
-  const lv_font_t* f28 = try_load_font(28);
-  const lv_font_t* f20 = try_load_font(20);
-  const lv_font_t* f16 = try_load_font(16);
+  const int sizes[4] = {48, 28, 20, 16};
+  for (int i = 0; i < 4; ++i) g_rt_fonts[i] = try_load_font(sizes[i]);
+  ui::set_fonts(g_rt_fonts[0], g_rt_fonts[1], g_rt_fonts[2], g_rt_fonts[3]);
+  home::set_name_font(g_rt_fonts[3]);
+  ESP_LOGI(TAG, "deck font metadata loaded in %lld ms",
+           (esp_timer_get_time() - t0) / 1000);
+}
 
-  if (lvgl_port_lock(pdMS_TO_TICKS(5000))) {
-    ui::set_fonts(f48, f28, f20, f16);
-    home::set_name_font(f16);
-    // Re-render whatever is on the glass so an early-opened card or the
-    // picker's deck names pick the new glyphs up immediately.
-    if (g_session != nullptr && g_current >= 0) show_current();
-    lvgl_port_unlock();
+// Walks all four fonts and pulls in every glyph that hasn't been faulted in
+// yet, in file order and in big sequential reads. Purely an optimisation:
+// the UI is already correct without it, this just means that once it
+// finishes nothing in the review loop can stall on a LittleFS read.
+//
+// Runs WITHOUT the LVGL lock. rtfont's own per-font mutex is what keeps this
+// from racing the on-demand loads that happen inside LVGL's draw path.
+void font_prewarm_task(void*) {
+  const int64_t t0 = esp_timer_get_time();
+  for (auto* f : g_rt_fonts) {
+    if (f) rtfont_prewarm(f);
   }
-  ESP_LOGI(TAG, "deck fonts swapped in after %lld ms",
+  ESP_LOGI(TAG, "deck fonts prewarmed after %lld ms",
            (esp_timer_get_time() - t0) / 1000);
   vTaskDelete(nullptr);
 }
@@ -958,8 +957,7 @@ extern "C" void app_main() {
   // review-log replay and scanning the deck files, and a dark screen reads
   // as "not responding". Draw a splash with the compiled-in fonts, flush
   // it, and only then lift the backlight (held low since power_on()) onto
-  // a drawn frame. home_ui replaces this screen when the picker is ready;
-  // the big deck fonts are NOT waited for here (see font_load_task).
+  // a drawn frame. home_ui replaces this screen when the picker is ready.
   if (lvgl_port_lock(pdMS_TO_TICKS(1000))) {
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0B0B0F), LV_PART_MAIN);
@@ -1020,6 +1018,7 @@ extern "C" void app_main() {
 
   // --- UI -----------------------------------------------------------------
   lvgl_port_lock(0);
+  load_deck_fonts();
   ui::init(UI_H_RES, UI_V_RES);
   ui::set_callbacks(on_reveal, on_grade);
   ui::set_back_callback(on_back);
@@ -1033,9 +1032,10 @@ extern "C" void app_main() {
   go_home();
   lvgl_port_unlock();
 
-  // The picker above is live right now, on the compiled-in fonts. The
-  // multi-MB deck fonts stream in behind it; see font_load_task.
-  xTaskCreate(font_load_task, "fonts", 8192, nullptr, 2, nullptr);
+  // The picker above is already live on the real deck fonts. This just
+  // pulls the rest of the glyph bitmaps off flash ahead of being asked for;
+  // see font_prewarm_task.
+  xTaskCreate(font_prewarm_task, "fonts", 4096, nullptr, 2, nullptr);
 
   devctl::init(start_calibration, on_time_synced, on_gap_adjust);
 

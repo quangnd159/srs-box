@@ -94,9 +94,8 @@ void refresh_timer_cb(lv_timer_t*) {
 void set_name_font(const lv_font_t* font) {
   if (!font) return;
   g.name_font = font;
-  // Restyle rows that already exist: the deck fonts arrive from a
-  // background load after the picker is on screen (see main.cpp's
-  // font_load_task), so this cannot only apply to future rows.
+  // Restyle rows that already exist, so this works whether it is called
+  // before init() (the boot path) or after.
   for (int i = 0; i < g.row_count; ++i) {
     lv_obj_set_style_text_font(g.rows[i].name, font, LV_PART_MAIN);
   }

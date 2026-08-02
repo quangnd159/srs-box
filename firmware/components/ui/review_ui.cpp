@@ -381,8 +381,9 @@ void set_fonts(const lv_font_t* f48, const lv_font_t* f28, const lv_font_t* f20,
   if (f20) g.font20 = f20;
   if (f16) g.font16 = f16;
   // The card labels re-read these pointers on every show_card(), but the
-  // topbar deck label is built once at init() — which main.cpp runs BEFORE
-  // the runtime fonts load — so restyle it here or it keeps the old font.
+  // topbar deck label is built once at init(). main.cpp now calls this
+  // before init(), so the guard is what makes that ordering work; the
+  // restyle covers a later call.
   if (g.deck_label) lv_obj_set_style_text_font(g.deck_label, g.font16, LV_PART_MAIN);
 }
 

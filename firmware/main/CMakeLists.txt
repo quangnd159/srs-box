@@ -13,5 +13,5 @@ idf_component_register(
                  "../components/persist/include"
                  "../components/ui/include"
     EMBED_FILES "../../decks/hsk1-2.srs"
-    REQUIRES devctl littlefs power
+    REQUIRES devctl littlefs power rtfont
 )
