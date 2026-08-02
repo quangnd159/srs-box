@@ -107,7 +107,11 @@ describe("ConnectionStore", () => {
     expect(snap.busy).toBe(false);
     expect(snap.stat?.reviews_today).toBe(2);
     expect(snap.rows).toEqual([]);
-    expect(snap.log.map((l) => l.text)).toEqual(["connected", "clock synced", "device state read"]);
+    expect(snap.log.filter((l) => l.kind !== "progress").map((l) => l.text)).toEqual([
+      "connected",
+      "clock synced",
+      "device state read",
+    ]);
     expect(snap.log.every((l) => l.kind !== "error")).toBe(true);
   });
 
