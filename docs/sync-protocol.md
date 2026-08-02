@@ -31,6 +31,13 @@ today. Paths are **relative to `/data`**, must match
 `[A-Za-z0-9._/-]+`, must not contain `..`, and only `decks/`, `fonts/`,
 and `revlog.bin` are addressable.
 
+Both clients send `@time <unix_epoch_seconds>` automatically before the
+first command of any of the above (web app: right after WebSerial connects;
+`./dev`/`devctl.py`: once at the start of each `push`/`pull`/`ls`/`rm`/
+`sync`/`reboot` invocation), so every connection re-anchors the device's
+clock without the user having to remember `./dev synctime`. That auto-sync
+is best-effort and never blocks the requested operation on failure.
+
 ```
 @fput <path> <nbytes> <crc32>     push a file
 @fget <path>                      pull a file
@@ -109,4 +116,5 @@ reading (e.g. French IPA) renders in a single neutral colour.
 
 Non-Chinese decks compile from a 3-column TSV: `front <TAB> reading
 <TAB> back` (reading may be empty). The 5-column hskhsk format remains
-supported for Chinese.
+supported for Chinese, and its numeric-pinyin column is what the syllable
+separator in the reading field is derived from (see docs/deck-format.md).

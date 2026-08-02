@@ -4,6 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail=0
 
+echo "=== deck compiler: pinyin syllable segmentation ==="
+python3 "$ROOT/tools/test_deckc.py" || fail=1
+
+echo
 echo "=== FSRS-6 vs py-fsrs reference ==="
 cd "$ROOT/firmware/components/fsrs/test"
 c++ -std=c++17 -O2 -I../include gen_trace.cpp -o /tmp/gen_trace

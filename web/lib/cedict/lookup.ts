@@ -31,6 +31,7 @@ export function loadCedict(): Promise<CedictTable> {
 
 export interface AutofillResult {
   reading: string; // diacritic pinyin, ready to display/edit
+  numeric: string; // the same reading in numeric tones, kept for syllable segmentation
   gloss: string;
 }
 
@@ -39,5 +40,5 @@ export function autofill(table: CedictTable, headword: string): AutofillResult |
   const entries = table[headword];
   if (!entries || entries.length === 0) return undefined;
   const [first] = entries;
-  return { reading: toDiacritics(first.pinyin), gloss: first.gloss };
+  return { reading: toDiacritics(first.pinyin), numeric: first.pinyin, gloss: first.gloss };
 }

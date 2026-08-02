@@ -11,11 +11,11 @@ describe("autofill", () => {
   };
 
   test("converts pinyin to diacritics and returns the gloss", () => {
-    expect(autofill(table, "你好")).toEqual({ reading: "nǐ hǎo", gloss: "hello; hi" });
+    expect(autofill(table, "你好")).toEqual({ reading: "nǐ hǎo", numeric: "ni3 hao3", gloss: "hello; hi" });
   });
 
   test("picks the first entry for a heteronym", () => {
-    expect(autofill(table, "行")).toEqual({ reading: "xíng", gloss: "to walk; ok" });
+    expect(autofill(table, "行")).toEqual({ reading: "xíng", numeric: "xing2", gloss: "to walk; ok" });
   });
 
   test("returns undefined for an unknown headword", () => {

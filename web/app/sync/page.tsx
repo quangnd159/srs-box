@@ -29,6 +29,12 @@ export default function SyncPage() {
       setTransport(t);
       setClient(c);
       push("connected");
+      try {
+        await c.syncTime(Math.floor(Date.now() / 1000));
+        push("clock synced");
+      } catch (err) {
+        push(`auto clock sync failed: ${(err as Error).message}`, "error");
+      }
     } catch (err) {
       push(`connect failed: ${(err as Error).message}`, "error");
     }

@@ -1,12 +1,12 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useMemo, useState } from "react";
 import { buildDeck } from "@/lib/compiler/build";
 import { autofill, loadCedict, type CedictTable } from "@/lib/cedict/lookup";
 import { importTsv, importWordList } from "@/lib/deck/import";
 import type { Card, Deck } from "@/lib/deck/types";
 import { isValidSlug } from "@/lib/deck/types";
-import { useDeckStore } from "@/lib/deck/useDeckStore";
+import { useDeckStore, useHasMounted } from "@/lib/deck/useDeckStore";
 
 function newLocalId(): string {
   return crypto.randomUUID();
@@ -14,12 +14,22 @@ function newLocalId(): string {
 
 export default function DeckEditorPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = use(params);
+  const hasMounted = useHasMounted();
   const store = useDeckStore();
   // Computed fresh each render (a cheap synchronous localStorage read); the
   // only way this page changes decks is a full navigation (see
-  // handleChangeSlug below), so it doesn't need to be React state.
+  // handleChangeSlug below), so it doesn't need to be React state. Before
+  // mount, `store` is backed by an empty stand-in (see useDeckStore), so
+  // this is undefined until hasMounted flips true; the render below gates
+  // on that instead of showing a false "no such deck" message.
   const deck: Deck | undefined = store.getDeck(slug);
-  const [cards, setCards] = useState<Card[]>(() => store.getCards(slug));
+  const [cardsTick, setCardsTick] = useState(0);
+  // Same derive-don't-copy reasoning as `deck` above: recomputes for free
+  // both after persist() writes and when the store swaps post-mount.
+  // cardsTick isn't read in the body; it's a deliberate cache-buster, so
+  // its dep is not "unnecessary" despite what exhaustive-deps thinks.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cards: Card[] = useMemo(() => store.getCards(slug), [store, slug, cardsTick]);
   const [pasteText, setPasteText] = useState("");
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
   const [cedict, setCedict] = useState<CedictTable | null>(null);
@@ -27,8 +37,8 @@ export default function DeckEditorPage({ params }: { params: Promise<{ slug: str
   const [status, setStatus] = useState<string | null>(null);
 
   function persist(next: Card[]) {
-    setCards(next);
     store.setCards(slug, next);
+    setCardsTick((t) => t + 1);
   }
 
   function updateCard(localId: string, patch: Partial<Card>) {
@@ -67,6 +77,7 @@ export default function DeckEditorPage({ params }: { params: Promise<{ slug: str
         return {
           ...c,
           reading: c.reading || result.reading,
+          numeric: c.reading ? c.numeric : result.numeric,
           back: c.back || result.gloss,
         };
       }),
@@ -110,6 +121,14 @@ export default function DeckEditorPage({ params }: { params: Promise<{ slug: str
     }
     const updated = store.changeSlug(slug, newSlug);
     window.location.href = `/decks/${updated.slug}`;
+  }
+
+  if (!hasMounted) {
+    return (
+      <div className="mx-auto max-w-3xl px-6 py-10">
+        <p className="text-sm text-zinc-500">Loading…</p>
+      </div>
+    );
   }
 
   if (!deck) {
@@ -192,7 +211,12 @@ export default function DeckEditorPage({ params }: { params: Promise<{ slug: str
                   <input
                     className="w-full rounded border border-zinc-300 bg-white px-2 py-1 dark:border-zinc-700 dark:bg-zinc-900"
                     value={card.reading}
-                    onChange={(e) => updateCard(card.localId, { reading: e.target.value })}
+                    onChange={(e) =>
+                      // Clearing `numeric` is deliberate: a hand-edited
+                      // reading is no longer described by the looked-up
+                      // numeric pinyin, and the compiler rejects a mismatch.
+                      updateCard(card.localId, { reading: e.target.value, numeric: "" })
+                    }
                   />
                 </td>
                 <td className="py-1 pr-2">

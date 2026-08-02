@@ -70,6 +70,32 @@ Records are sorted by `id` so lookup is a binary search over flash, no index nee
 
 Concatenated, not null-terminated; lengths come from the card record. Deduplicated by the compiler, so cards sharing a gloss share bytes.
 
+#### Syllable separators in the reading
+
+For `lang=zh`, the reading field is stored **syllable-separated**: `U+001F`
+(ASCII unit separator) between syllables, e.g. `yǒu␟shí␟hou`.
+
+This exists because a diacritic pinyin string does not say where its
+syllables end, and the device cannot work it out: a syllable's coda comes
+*after* its tone mark, so scanning for tone marks alone splits `yǒushíhou`
+as `yǒ | ushí | hou` — the coda gets donated to the next syllable. The
+boundaries are already known host-side, in the source TSV's numeric-pinyin
+column (`you3shi2hou5`), so the compiler aligns the two columns once (folding
+diacritics to base letters; `ü`, `u:` and `v` all fold together) and records
+the result. **Alignment failure is a compile error**, never a guessed split:
+a wrong split is a wrong reading, and silently shipping one is worse than
+refusing to build.
+
+U+001F was chosen because it is a control character: it cannot collide with
+reading text, it is skipped by the font subsetter (which has no glyph for
+it), and firmware too old to know about it simply falls back to the old
+tone-mark heuristic rather than mis-rendering. That is also why the magic
+stays `SRSDECK1` — the change is additive and both directions degrade
+gracefully.
+
+Readings without a separator (non-`zh` decks, or Chinese input with no
+numeric column) are stored verbatim.
+
 ### `FONT` — glyph subset
 
 An LVGL binary font containing exactly the glyphs reachable from `TEXT`, plus the Latin range for the UI. Regenerated on every compile.

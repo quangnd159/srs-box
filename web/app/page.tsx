@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { isValidSlug, type Deck } from "@/lib/deck/types";
 import { useDeckStore } from "@/lib/deck/useDeckStore";
 
@@ -15,7 +15,16 @@ function slugify(name: string): string {
 
 export default function DeckManagerPage() {
   const store = useDeckStore();
-  const [decks, setDecks] = useState<Deck[]>(() => store.listDecks());
+  const [refreshTick, setRefreshTick] = useState(0);
+  // Derived from the store rather than copied into state: it's a cheap
+  // synchronous localStorage read, and this way it recomputes for free
+  // both when refresh() bumps the tick and when the store itself swaps
+  // from its pre-mount stand-in to real localStorage (see useDeckStore),
+  // with no separate effect needed to keep the two in sync. refreshTick
+  // isn't read in the body; it's a deliberate cache-buster, so its dep is
+  // not "unnecessary" despite what exhaustive-deps thinks.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const decks: Deck[] = useMemo(() => store.listDecks(), [store, refreshTick]);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugEdited, setSlugEdited] = useState(false);
@@ -24,7 +33,7 @@ export default function DeckManagerPage() {
   const [renaming, setRenaming] = useState<Record<string, string>>({});
 
   function refresh() {
-    setDecks(store.listDecks());
+    setRefreshTick((t) => t + 1);
   }
 
   function handleNameChange(value: string) {

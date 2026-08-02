@@ -41,7 +41,9 @@ import sys
 glyphs = set()
 for path in sys.argv[1:]:
     glyphs |= set(open(path, encoding="utf-8").read())
-glyphs -= set("\n\r\t ")
+# Control characters have no glyph: the compiler's syllable separator
+# (U+001F, see tools/deckc.py) must never be requested here.
+glyphs = {c for c in glyphs if c > " "}  # drops whitespace and control chars
 cjk = "".join(sorted(c for c in glyphs if ord(c) >= 0x2E80))
 latin = "".join(sorted(c for c in glyphs if ord(c) < 0x2E80))
 print(latin)

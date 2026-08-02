@@ -4,6 +4,7 @@
 // web/test/deckc.test.ts for the acceptance test that checks this.
 
 import { crc32 } from "./crc32";
+import { segmentReading } from "./pinyin";
 import { stableId } from "./stableId";
 import { TextPool } from "./textPool";
 import type { BuildOptions, BuildResult, DeckRow } from "./types";
@@ -28,19 +29,40 @@ async function assignIds(rows: DeckRow[], slug: string): Promise<bigint[]> {
   return Promise.all(rows.map((r) => stableId(slug, r.front)));
 }
 
+/**
+ * The reading as stored: syllable-separated for zh, verbatim otherwise.
+ * Only lang "zh" is tone-coloured on-device (review_ui.cpp set_lang), and
+ * only 5-column input carries a numeric-pinyin column to segment with, so
+ * everything else passes through untouched. Mirrors deckc.py's
+ * reading_field(); a row the two columns disagree on throws rather than
+ * shipping a guessed split.
+ */
+function readingField(row: DeckRow, lang: string): string {
+  if (lang !== "zh" || !row.numeric || !row.reading) return row.reading;
+  try {
+    return segmentReading(row.reading, row.numeric);
+  } catch (err) {
+    throw new Error(
+      `cannot align pinyin syllables for ${row.front} (${row.numeric} / ${row.reading}): ` +
+        `${(err as Error).message}`,
+    );
+  }
+}
+
 /** Compiles rows into a `.srs` bundle. See docs/deck-format.md. */
 export async function buildDeck(rows: DeckRow[], opts: BuildOptions): Promise<BuildResult> {
   if (rows.length === 0) {
     throw new Error("no usable rows");
   }
 
+  const lang = opts.lang ?? "zh"; // matches deckc.py's --lang default
   const ids = await assignIds(rows, opts.slug);
   const text = new TextPool();
   const pooled: PooledCard[] = rows.map((row, i) => ({
     id: ids[i],
     front: text.add(row.front),
     back: text.add(row.back),
-    reading: text.add(row.reading),
+    reading: text.add(readingField(row, lang)),
   }));
 
   // The device binary-searches this section, so it must be sorted by id.
@@ -65,8 +87,7 @@ export async function buildDeck(rows: DeckRow[], opts: BuildOptions): Promise<Bu
     cardView.setUint32(off + 28, 0, true); // reserved
   });
 
-  const lang = opts.lang ?? "zh"; // matches deckc.py's --lang default
-  const metaText = `name=${opts.name}\nslug=${opts.slug}\ncards=${pooled.length}\nlang=${lang}\n`;
+  const metaText =`name=${opts.name}\nslug=${opts.slug}\ncards=${pooled.length}\nlang=${lang}\n`;
   const metaBlob = new TextEncoder().encode(metaText);
   const textBlob = text.toBytes();
 
@@ -115,9 +136,14 @@ export async function buildDeck(rows: DeckRow[], opts: BuildOptions): Promise<Bu
   out.set(header, 0);
   out.set(payload, HEADER_SIZE);
 
+  // Collected from the source text, never from the emitted reading: the
+  // syllable separator is a control character and must not reach the font
+  // subsetter, which would ask lv_font_conv for a glyph that doesn't exist.
   const glyphSet = new Set<string>();
   for (const r of rows) {
-    for (const ch of r.front + r.reading + r.back) glyphSet.add(ch);
+    for (const ch of r.front + r.reading + r.back) {
+      if (ch >= " ") glyphSet.add(ch);
+    }
   }
   const glyphs = Array.from(glyphSet).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const cjkGlyphs = glyphs.filter((g) => {

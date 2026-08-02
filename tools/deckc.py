@@ -22,6 +22,10 @@ other):
 language-specific rendering on-device: pinyin tone-colouring of the reading
 line applies only when lang=zh (see docs/sync-protocol.md).
 
+For zh decks the reading is emitted with an ASCII unit separator (0x1F)
+between syllables, reconstructed from the numeric-pinyin column, so the
+device does not have to guess where syllables end. See `segment_reading`.
+
 See docs/deck-format.md for the binary layout. The compiler is also
 responsible for reporting the glyph set, which the font subsetter consumes.
 """
@@ -56,6 +60,141 @@ def stable_id(deck_slug: str, headword: str) -> int:
     # Top bit cleared so the value stays positive if it ever lands in a
     # signed integer on the host side.
     return int.from_bytes(digest[:8], "little") & 0x7FFFFFFFFFFFFFFF
+
+
+# ---------------------------------------------------------------------------
+# Pinyin syllable segmentation.
+#
+# The display reading ("yǒushíhou") carries tone marks but no syllable
+# boundaries, and a syllable's coda sits *after* its tone mark, so the device
+# cannot recover the boundaries by scanning for tone marks alone: "yǒushíhou"
+# would come out as "yǒ|ushí|hou". The boundaries are however already in the
+# source TSV, in the numeric-pinyin column ("you3shi2hou5"), so the compiler
+# does the split once and records it.
+#
+# The result is written into the reading field with U+001F (ASCII unit
+# separator) between syllables. It is a control character, so it can never
+# collide with reading text, never reaches a font subset, and old firmware
+# that ignores it degrades to the old heuristic rather than mis-rendering.
+SYLLABLE_SEP = "\x1f"
+
+# Tone-marked vowels folded to their base letter, so a numeric syllable
+# ("lve") can be compared against the display letters ("lüè"). ü and its
+# toned forms fold to "v", matching the "v"/"u:" spellings the numeric
+# column uses for it.
+_FOLD = {
+    ch: base
+    for base, marked in (
+        ("a", "āáǎà"),
+        ("e", "ēéěè"),
+        ("i", "īíǐì"),
+        ("o", "ōóǒò"),
+        ("u", "ūúǔù"),
+        ("v", "ǖǘǚǜü"),
+    )
+    for ch in marked
+}
+
+# Characters that are part of a reading but not part of a syllable: the
+# comma-space between alternate readings ("cháng, zhǎng"), the syllable
+# apostrophe ("Xī'ān"), hyphens and the middle dot.
+_GLUE = " ,'-·"
+
+
+def _fold(ch: str) -> str:
+    c = ch.lower()
+    return _FOLD.get(c, c)
+
+
+def numeric_syllables(numeric: str) -> list[str]:
+    """Splits a numeric-pinyin string into folded, digit-free syllables.
+
+    "you3shi2hou5" -> ["you", "shi", "hou"]. Raises ValueError on anything
+    it cannot account for, because a guessed split is worse than no split.
+    """
+    out: list[str] = []
+    cur = ""
+    i = 0
+    while i < len(numeric):
+        ch = numeric[i]
+        if ch.isdigit():
+            if ch not in "12345" or not cur:
+                raise ValueError(f"stray tone digit {ch!r}")
+            out.append(cur)
+            cur = ""
+        elif ch.isascii() and ch.isalpha():
+            f = _fold(ch)
+            if f == "u" and numeric[i + 1 : i + 2] == ":":
+                f = "v"  # "lu:e4", the ASCII spelling of "lüe4"
+                i += 1
+            cur += f
+        elif ch == "ü" or ch == "Ü":
+            cur += "v"
+        elif ch in _GLUE:
+            pass
+        else:
+            raise ValueError(f"unexpected character {ch!r} in numeric pinyin")
+        i += 1
+    if cur:
+        raise ValueError(f"syllable {cur!r} has no tone digit")
+    # Erhua: a trailing "r" is a suffix on the preceding syllable, not a
+    # syllable of its own, so "hai2r5" is one run ("háir"), not two.
+    merged: list[str] = []
+    for syl in out:
+        if syl == "r" and merged:
+            merged[-1] += "r"
+        else:
+            merged.append(syl)
+    return merged
+
+
+def segment_reading(reading: str, numeric: str) -> str:
+    """Returns `reading` with SYLLABLE_SEP inserted at syllable boundaries.
+
+    Alignment is by folded letters: each numeric syllable consumes exactly
+    that many letters of the display reading, and glue characters (see
+    _GLUE) ride along without being counted. Raises ValueError if the two
+    columns disagree anywhere; the caller must fail the compile rather than
+    emit a guess.
+    """
+    if not reading or not numeric:
+        return reading
+    syllables = numeric_syllables(numeric)
+    if not syllables:
+        raise ValueError("no syllables in the numeric pinyin")
+
+    segments: list[str] = []
+    i = 0
+    for syl in syllables:
+        seg = ""
+        j = 0
+        while j < len(syl):
+            if i >= len(reading):
+                raise ValueError(f"reading ends before syllable {syl!r}")
+            ch = reading[i]
+            if ch.isalpha():
+                if _fold(ch) != syl[j]:
+                    raise ValueError(f"{ch!r} does not match {syl[j]!r} of {syl!r}")
+                j += 1
+            elif ch in _GLUE:
+                if j != 0:
+                    raise ValueError(f"{ch!r} splits syllable {syl!r}")
+            else:
+                raise ValueError(f"unexpected character {ch!r} in the reading")
+            seg += ch
+            i += 1
+        segments.append(seg)
+
+    while i < len(reading):  # trailing glue joins the last syllable
+        ch = reading[i]
+        if ch.isalpha():
+            raise ValueError(f"unconsumed reading text {reading[i:]!r}")
+        if ch not in _GLUE:
+            raise ValueError(f"unexpected character {ch!r} in the reading")
+        segments[-1] += ch
+        i += 1
+
+    return SYLLABLE_SEP.join(segments)
 
 
 class TextPool:
@@ -101,9 +240,10 @@ def read_rows(path: Path) -> list[dict]:
                 continue
 
             if expected_cols == 5:
-                front, _traditional, _numeric, reading, back = parts[:5]
+                front, _traditional, numeric, reading, back = parts[:5]
             else:
                 front, reading, back = parts[:3]
+                numeric = ""
 
             front = front.strip()
             if not front:
@@ -114,8 +254,36 @@ def read_rows(path: Path) -> list[dict]:
                       file=sys.stderr)
                 continue
             seen.add(front)
-            rows.append(dict(front=front, reading=reading.strip(), back=back.strip()))
+            rows.append(
+                dict(
+                    front=front,
+                    reading=reading.strip(),
+                    back=back.strip(),
+                    numeric=numeric.strip(),
+                    lineno=lineno,
+                )
+            )
     return rows
+
+
+def reading_field(row: dict, lang: str, src: Path) -> str:
+    """The reading as stored: syllable-separated for zh, verbatim otherwise.
+
+    Only lang "zh" is tone-coloured on-device (see review_ui.cpp set_lang),
+    and only the 5-column shape carries a numeric-pinyin column to segment
+    with, so everything else passes through untouched and byte-identically.
+    """
+    if lang != "zh" or not row["numeric"] or not row["reading"]:
+        return row["reading"]
+    try:
+        return segment_reading(row["reading"], row["numeric"])
+    except ValueError as exc:
+        sys.exit(
+            f"{src}:{row['lineno']}: cannot align pinyin syllables: {exc}\n"
+            f"  {row['front']}\t{row['numeric']}\t{row['reading']}\n"
+            f"  fix the numeric-pinyin or reading column; the compiler will "
+            f"not guess a split"
+        )
 
 
 def build(args) -> int:
@@ -129,7 +297,7 @@ def build(args) -> int:
     for row in rows:
         front = text.add(row["front"])
         back = text.add(row["back"])
-        reading = text.add(row["reading"])
+        reading = text.add(reading_field(row, args.lang, src))
         cards.append(
             dict(
                 id=stable_id(args.id, row["front"]),
@@ -190,7 +358,17 @@ def build(args) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(header + payload)
 
-    glyphs = sorted({ch for r in rows for ch in (r["front"] + r["reading"] + r["back"])})
+    # Collected from the source text, never from the emitted reading: the
+    # syllable separator is a control character and must not reach the font
+    # subsetter, which would ask lv_font_conv for a glyph that doesn't exist.
+    glyphs = sorted(
+        {
+            ch
+            for r in rows
+            for ch in (r["front"] + r["reading"] + r["back"])
+            if ch >= " "
+        }
+    )
     cjk = [g for g in glyphs if "一" <= g <= "鿿"]
 
     print(f"{out}  {total_size:,} bytes")
@@ -234,7 +412,11 @@ def inspect(args) -> int:
         toff, _ = sections[b"TEXT"]
 
         def s(o: int, n: int) -> str:
-            return data[toff + o : toff + o + n].decode("utf-8") if n else ""
+            if not n:
+                return ""
+            # Syllable separators are shown as a middle dot so a compiled
+            # reading's splits are visible here.
+            return data[toff + o : toff + o + n].decode("utf-8").replace(SYLLABLE_SEP, "·")
 
         n = clen // CARD_SIZE
         print(f"--- {n} cards, first {min(args.limit, n)} ---")

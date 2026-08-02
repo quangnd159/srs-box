@@ -66,8 +66,9 @@ export function parseTsv(text: string): ParseResult {
     let front: string;
     let reading: string;
     let back: string;
+    let numeric = "";
     if (expectedCols === 5) {
-      [front, , , reading, back] = parts;
+      [front, , numeric, reading, back] = parts;
     } else {
       [front, reading, back] = parts;
     }
@@ -79,7 +80,7 @@ export function parseTsv(text: string): ParseResult {
       continue;
     }
     seen.add(front);
-    rows.push({ front, reading: reading.trim(), back: back.trim() });
+    rows.push({ front, reading: reading.trim(), back: back.trim(), numeric: numeric.trim() });
   }
   return { rows, warnings };
 }

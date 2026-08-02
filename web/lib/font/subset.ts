@@ -68,7 +68,11 @@ export function splitByScript(glyphs: string): { latin: string; cjk: string } {
   const latin: string[] = [];
   const cjk: string[] = [];
   for (const ch of new Set(Array.from(glyphs))) {
-    if ((ch.codePointAt(0) ?? 0) >= CJK_CUTOFF) cjk.push(ch);
+    const cp = ch.codePointAt(0) ?? 0;
+    // Control characters have no glyph: the compiler's syllable separator
+    // (U+001F, see lib/compiler/pinyin.ts) must never be requested here.
+    if (cp < 0x20) continue;
+    if (cp >= CJK_CUTOFF) cjk.push(ch);
     else latin.push(ch);
   }
   latin.sort();

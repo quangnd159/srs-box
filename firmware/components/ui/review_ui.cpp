@@ -50,6 +50,10 @@ struct Widgets {
   int h = 0;
   int body_h = 0;
 
+  // The reading row's inherited inter-run gap, captured at init(); see
+  // show_card(), which restores it for unsegmented (legacy) readings.
+  int32_t reading_pad_column = 0;
+
   // Runtime fonts (see set_fonts()) override these when non-null; otherwise
   // the compiled-in subset above is used. Kept as pointers rather than
   // re-declaring the extern fonts everywhere they're used.
@@ -71,6 +75,16 @@ Widgets g;
 
 // ---------------------------------------------------------------------------
 // Pinyin tone colouring.
+//
+// Syllable boundaries are not recoverable from a diacritic pinyin string, so
+// the compiler records them: a zh deck's reading arrives with U+001F (ASCII
+// unit separator) between syllables, derived from the source TSV's numeric
+// pinyin column (see tools/deckc.py's segment_reading). Each syllable is one
+// coloured run, coloured by the tone mark inside it, grey when it has none
+// (a neutral-tone syllable). The separator itself is never drawn.
+//
+// Decks compiled before that existed have no separators, and fall back to
+// the heuristic below.
 //
 // Anki-adjacent tone-colour schemes colour each syllable by its tone number;
 // doing that properly needs a pinyin syllable dictionary, which is more
@@ -135,8 +149,53 @@ struct ToneRun {
   int tone;  // 0 = untoned run, see tone_color()
 };
 
+// The compiler's syllable separator; see the comment above `kToneVowels`.
+constexpr char kSyllableSep = '\x1F';
+
+// Gap between syllables, in pixels, for readings that carry real boundaries:
+// enough to read "yǒu shí hou" as three syllables the way a dictionary
+// prints it, at the 28px the reading line uses, without the word falling
+// apart into three words.
+constexpr int32_t kSyllableGap = 6;
+
+// True when the reading carries compiler-recorded syllable boundaries, i.e.
+// it was built by a compiler new enough to emit them.
+bool has_syllable_marks(const char* reading) {
+  return std::strchr(reading, kSyllableSep) != nullptr;
+}
+
+// Splits a separator-marked reading: one run per syllable, coloured by
+// whichever tone mark the syllable contains (none = neutral, grey). This is
+// exact, unlike the heuristic below, because the boundaries were computed
+// host-side from the numeric pinyin rather than guessed from the diacritics.
+int split_marked_syllables(const char* reading, ToneRun* out, int max_runs) {
+  int n = 0;
+  const char* seg = reading;
+  while (n < max_runs) {
+    const char* end = std::strchr(seg, kSyllableSep);
+    const size_t len = end ? static_cast<size_t>(end - seg) : std::strlen(seg);
+    if (len > 0) {
+      int tone = 0;
+      for (size_t i = 0; i < len; ++i) {
+        const int t = tone_at(seg, i, len);
+        if (t != 0) {
+          tone = t;
+          break;
+        }
+      }
+      out[n++] = {seg, len, tone};
+    }
+    if (!end) break;
+    seg = end + 1;
+  }
+  return n;
+}
+
 // Splits `reading` into runs using the scheme described above `kToneVowels`.
 // Returns the number of runs written to `out` (capped at `max_runs`).
+//
+// Used only for decks compiled before the separator existed; anything with
+// separators goes through split_marked_syllables() instead.
 //
 // A syllable's coda (the letters after its tone-marked vowel, e.g. the "o"
 // in "mao" or the "ng" in "xiang") is not itself tone-marked, so once the
@@ -150,6 +209,7 @@ struct ToneRun {
 // syllable's tone; that residual misattribution is the one documented
 // simplification here (see the file comment above `kToneVowels`).
 int split_pinyin_tones(const char* reading, ToneRun* out, int max_runs) {
+  if (has_syllable_marks(reading)) return split_marked_syllables(reading, out, max_runs);
   const size_t len = std::strlen(reading);
   int n = 0;
   size_t seg_start = 0;
@@ -314,6 +374,10 @@ void init(int hor_res, int ver_res) {
   lv_obj_set_flex_flow(g.reading, LV_FLEX_FLOW_ROW_WRAP);
   lv_obj_set_flex_align(g.reading, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
+  // Whatever the theme puts between the run labels, kept so a deck without
+  // compiler-recorded syllable boundaries keeps rendering exactly as before;
+  // show_card() only overrides it for readings that do have them.
+  g.reading_pad_column = lv_obj_get_style_pad_column(g.reading, LV_PART_MAIN);
 
   g.divider = lv_obj_create(g.body);
   lv_obj_set_size(g.divider, hor_res - 60, 1);
@@ -396,6 +460,12 @@ void show_card(const CardView& card, bool revealed) {
   const char* reading = card.reading ? card.reading : "";
   if (reading[0]) {
     if (g.tone_color) {
+      // Dictionary-style spacing between syllables ("yǒu shí hou"), which
+      // only makes sense when the boundaries are the compiler's real ones;
+      // a legacy reading keeps the row's inherited gap.
+      lv_obj_set_style_pad_column(
+          g.reading, has_syllable_marks(reading) ? kSyllableGap : g.reading_pad_column,
+          LV_PART_MAIN);
       ToneRun runs[24];
       const int n = split_pinyin_tones(reading, runs, 24);
       char buf[64];

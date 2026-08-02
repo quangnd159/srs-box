@@ -21,6 +21,11 @@ export interface Card {
   front: string;
   reading: string;
   back: string;
+  /** Numeric-tone pinyin for `reading`, when known (from a 5-column paste or
+   * CC-CEDICT autofill). The compiler uses it to split the reading into
+   * syllables; it is cleared whenever the reading is edited by hand, since a
+   * stale one would no longer describe it. See lib/compiler/pinyin.ts. */
+  numeric?: string;
 }
 
 export const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*$/;

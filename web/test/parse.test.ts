@@ -4,7 +4,7 @@ import { parseTsv } from "../lib/compiler/parse";
 describe("parseTsv: 5-column hskhsk format", () => {
   test("parses simplified/traditional/numeric/pinyin/gloss", () => {
     const { rows } = parseTsv("爱\t愛\tai4\tài\tyêu; yêu thích\n");
-    expect(rows).toEqual([{ front: "爱", reading: "ài", back: "yêu; yêu thích" }]);
+    expect(rows).toEqual([{ front: "爱", reading: "ài", back: "yêu; yêu thích", numeric: "ai4" }]);
   });
 
   test("detects the shape from the first row and skips short later rows", () => {
@@ -16,7 +16,7 @@ describe("parseTsv: 5-column hskhsk format", () => {
 
   test("skips duplicate headwords, keeping the first", () => {
     const { rows, warnings } = parseTsv("爱\t愛\tai4\tài\tfirst\n爱\t愛\tai4\tài\tsecond\n");
-    expect(rows).toEqual([{ front: "爱", reading: "ài", back: "first" }]);
+    expect(rows).toEqual([{ front: "爱", reading: "ài", back: "first", numeric: "ai4" }]);
     expect(warnings).toHaveLength(1);
   });
 
@@ -34,12 +34,12 @@ describe("parseTsv: 5-column hskhsk format", () => {
 describe("parseTsv: 3-column generic format", () => {
   test("parses front/reading/back", () => {
     const { rows } = parseTsv("bonjour\tbɔ̃ʒuʁ\thello\n");
-    expect(rows).toEqual([{ front: "bonjour", reading: "bɔ̃ʒuʁ", back: "hello" }]);
+    expect(rows).toEqual([{ front: "bonjour", reading: "bɔ̃ʒuʁ", back: "hello", numeric: "" }]);
   });
 
   test("allows an empty reading column", () => {
     const { rows } = parseTsv("bonjour\t\thello\n");
-    expect(rows).toEqual([{ front: "bonjour", reading: "", back: "hello" }]);
+    expect(rows).toEqual([{ front: "bonjour", reading: "", back: "hello", numeric: "" }]);
   });
 
   test("a 2-field first row locks in the 3-column shape and is itself skipped", () => {
@@ -48,7 +48,7 @@ describe("parseTsv: 3-column generic format", () => {
     // is checked against that shape, so an under-length first row is
     // dropped rather than special-cased.
     const { rows, warnings } = parseTsv("bonjour\thello\nchat\tʃa\tcat\n");
-    expect(rows).toEqual([{ front: "chat", reading: "ʃa", back: "cat" }]);
+    expect(rows).toEqual([{ front: "chat", reading: "ʃa", back: "cat", numeric: "" }]);
     expect(warnings).toHaveLength(1);
   });
 });
