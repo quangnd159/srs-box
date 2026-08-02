@@ -21,6 +21,91 @@ export interface FlsResult {
 
 export type ProgressCallback = (sent: number, total: number) => void;
 
+export interface DeviceStatDeck {
+  slug: string;
+  name: string;
+  lang: string;
+  cards: number;
+  learning: number;
+  due: number;
+  fresh: number;
+}
+
+/**
+ * Snapshot of device state, as built by main.cpp's on_stat_query(). `fw` and
+ * `battery` are omitted by firmware that can't report them, and `time` is 0
+ * when the device's clock has never been set (there's no RTC; see CLAUDE.md).
+ */
+export interface DeviceStat {
+  fw?: string;
+  battery?: { pct: number; charging: boolean };
+  time: number;
+  reviews_today: number;
+  decks: DeviceStatDeck[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function num(value: unknown, fallback = 0): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function str(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+/**
+ * Parses the JSON body of an `@ok stat` reply. Deliberately lenient about
+ * everything except "is this an object at all": firmware older or newer than
+ * this client may omit fields or add ones we don't know about, and a
+ * dashboard that shows a blank battery is far better than one that refuses to
+ * load. Only unparseable JSON or a non-object root throws.
+ */
+export function parseDeviceStat(json: string): DeviceStat {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch (err) {
+    throw new DeviceError(`@stat: malformed JSON: ${(err as Error).message}`);
+  }
+  const root = asRecord(raw);
+  if (!root) throw new DeviceError(`@stat: expected a JSON object, got ${JSON.stringify(json)}`);
+
+  const stat: DeviceStat = {
+    time: num(root.time),
+    reviews_today: num(root.reviews_today),
+    decks: [],
+  };
+
+  if (typeof root.fw === "string" && root.fw) stat.fw = root.fw;
+
+  const battery = asRecord(root.battery);
+  if (battery) {
+    stat.battery = { pct: num(battery.pct), charging: battery.charging === true };
+  }
+
+  if (Array.isArray(root.decks)) {
+    for (const entry of root.decks) {
+      const deck = asRecord(entry);
+      if (!deck) continue;
+      stat.decks.push({
+        slug: str(deck.slug),
+        name: str(deck.name),
+        lang: str(deck.lang),
+        cards: num(deck.cards),
+        learning: num(deck.learning),
+        due: num(deck.due),
+        fresh: num(deck.fresh),
+      });
+    }
+  }
+
+  return stat;
+}
+
 function crcHex(data: Uint8Array): string {
   return crc32(data).toString(16).padStart(8, "0");
 }
@@ -64,6 +149,21 @@ export class DeviceClient {
     await this.writeLine(`@time ${Math.floor(unixSeconds)}`);
     const line = await this.readControlLine();
     this.assertOk(line, "@time");
+  }
+
+  /**
+   * Device-state snapshot: battery, clock, today's review count, and per-deck
+   * queue counts. Throws DeviceError on `@err`, which is what firmware
+   * without an `@stat` handler replies, so callers can degrade gracefully.
+   */
+  async stat(): Promise<DeviceStat> {
+    await this.writeLine("@stat");
+    const line = await this.readControlLine();
+    if (!line.startsWith("@ok stat ")) {
+      this.assertOk(line, "@stat");
+      throw new DeviceError(`@stat: unexpected reply ${JSON.stringify(line)}`);
+    }
+    return parseDeviceStat(line.slice("@ok stat ".length));
   }
 
   /**

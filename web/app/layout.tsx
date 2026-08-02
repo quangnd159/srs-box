@@ -37,8 +37,11 @@ export default function RootLayout({
             <Link href="/" className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
               Decks
             </Link>
-            <Link href="/sync" className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
-              Sync
+            <Link href="/device" className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
+              Device
+            </Link>
+            <Link href="/stats" className="text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100">
+              Stats
             </Link>
           </nav>
         </header>
