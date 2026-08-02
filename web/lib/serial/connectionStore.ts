@@ -201,6 +201,21 @@ export class ConnectionStore {
     this.log = [...this.log, { text, kind }];
   }
 
+  /** pushLog + notify: for progress lines inside long operations, so the
+   * pane shows which stage is running rather than going silent until the
+   * whole operation settles. */
+  private logNow(text: string, kind: LogEntry["kind"] = "info"): void {
+    this.pushLog(text, kind);
+    this.notify();
+  }
+
+  /** For errors that escaped the store entirely (unhandled rejections,
+   * window.onerror); wired up by the device page so nothing can fail
+   * invisibly while this page is open. */
+  noteExternalError(text: string): void {
+    this.logNow(text, "error");
+  }
+
   /**
    * Runs `fn` after every previously-queued operation has settled, with
    * `busy` true for its whole run. Any throw (including a DeviceClient
@@ -363,6 +378,7 @@ export class ConnectionStore {
     }
     this.notify();
 
+    this.logNow("listing device files (@fls)...", "progress");
     const listing = await c.fls();
     if (listing.truncated) this.pushLog("@fls reply was truncated; some files may be missing", "progress");
 
@@ -371,6 +387,7 @@ export class ConnectionStore {
     for (const entry of listing.entries) {
       if (!entry.path.startsWith("decks/") || !entry.path.endsWith(".srs")) continue;
       const fallbackSlug = entry.path.slice("decks/".length, -".srs".length);
+      this.logNow(`reading ${entry.path} (${entry.size.toLocaleString()} bytes)...`, "progress");
       try {
         const data = await c.fget(entry.path);
         const parsed = parseDeck(data);
@@ -400,6 +417,7 @@ export class ConnectionStore {
     }
     this.deviceCards = cardMap;
 
+    this.logNow("compiling local decks for comparison...", "progress");
     const locals = await this.compileLocals();
     const statBySlug = new Map(statResult?.decks.map((d) => [d.slug, d]) ?? []);
 

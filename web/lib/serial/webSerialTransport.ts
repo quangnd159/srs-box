@@ -15,7 +15,7 @@ export const ESPRESSIF_USB_VENDOR_ID = 0x303a;
 // Minimal Web Serial API surface this module needs. Not every browser's
 // lib.dom.d.ts ships these types yet, so they're declared locally.
 export interface SerialPortLike {
-  open(options: { baudRate: number }): Promise<void>;
+  open(options: { baudRate: number; bufferSize?: number }): Promise<void>;
   close(): Promise<void>;
   readable: ReadableStream<Uint8Array> | null;
   writable: WritableStream<Uint8Array> | null;
@@ -48,6 +48,10 @@ export function hasSerialApi(): boolean {
 
 const BAUD_RATE = 115200;
 
+// Chromium's default receive buffer is 255 bytes, which turns a deck-sized
+// @fget into thousands of tiny reads; 256KB lets transfers run at USB speed.
+const BUFFER_SIZE = 256 * 1024;
+
 export class WebSerialTransport implements SerialTransport {
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
@@ -71,7 +75,7 @@ export class WebSerialTransport implements SerialTransport {
    */
   static async open(port: SerialPortLike): Promise<WebSerialTransport> {
     if (port.readable === null || port.writable === null) {
-      await port.open({ baudRate: BAUD_RATE });
+      await port.open({ baudRate: BAUD_RATE, bufferSize: BUFFER_SIZE });
     }
     const transport = new WebSerialTransport(port);
     if (!port.readable || !port.writable) {

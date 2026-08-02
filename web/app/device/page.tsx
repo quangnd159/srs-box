@@ -46,6 +46,24 @@ export default function DevicePage() {
     void connectionStore.tryAutoReconnect();
   }, []);
 
+  // Anything that slips past the store's own catch-and-log (an unhandled
+  // rejection, a synchronous throw in a handler) still lands in the log
+  // pane; a silent failure here once cost a debugging round trip.
+  useEffect(() => {
+    const onRejection = (e: PromiseRejectionEvent) => {
+      connectionStore.noteExternalError(`unhandled rejection: ${String(e.reason)}`);
+    };
+    const onError = (e: ErrorEvent) => {
+      connectionStore.noteExternalError(`uncaught error: ${e.message}`);
+    };
+    window.addEventListener("unhandledrejection", onRejection);
+    window.addEventListener("error", onError);
+    return () => {
+      window.removeEventListener("unhandledrejection", onRejection);
+      window.removeEventListener("error", onError);
+    };
+  }, []);
+
   const serialSupported =
     !hasMounted || typeof navigator === "undefined" ? true : "serial" in navigator;
 
